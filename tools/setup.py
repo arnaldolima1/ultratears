@@ -207,6 +207,12 @@ def choose_dump(home, requested):
     for candidate in (home / 'game', ROOT / 'game'):
         if (candidate / 'exefs').is_dir() or (candidate / 'romfs').is_dir():
             return candidate.resolve()
+    try:   # the dump an earlier --dump gave for this output folder
+        remembered = json.loads((home / 'data/setup.json').read_text()).get('dump')
+    except (OSError, ValueError):
+        remembered = None
+    if remembered and pathlib.Path(remembered).is_dir():
+        return pathlib.Path(remembered)
     return (home / 'game').resolve()
 
 

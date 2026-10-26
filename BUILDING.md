@@ -44,8 +44,8 @@ Path selection is explicit and predictable:
 
 | Command | Output | Dump read from |
 |---|---|---|
-| `python tools/setup.py` | `<checkout>\dist` | `<output>\game` if populated, otherwise `<checkout>\game` |
-| `python tools/setup.py --output D:\Games\UltraTears` | `D:\Games\UltraTears` | `<output>\game` if populated, otherwise `<checkout>\game` |
+| `python tools/setup.py` | `<checkout>\dist` | `<output>\game` if populated, otherwise `<checkout>\game`, otherwise the last `--dump` |
+| `python tools/setup.py --output D:\Games\UltraTears` | `D:\Games\UltraTears` | `<output>\game` if populated, otherwise `<checkout>\game`, otherwise the last `--dump` |
 | `python tools/setup.py --dump D:\Dumps\TOTK` | `<checkout>\dist` | `D:\Dumps\TOTK` |
 | `python tools/setup.py --output D:\Games\UltraTears --dump D:\Dumps\TOTK` | `D:\Games\UltraTears` | `D:\Dumps\TOTK` |
 

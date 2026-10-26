@@ -147,7 +147,8 @@ This **one command performs the entire process**:
 1. Creates `dist` inside the repository.
 2. Copies the current tracked source files there.
 3. Downloads missing Python, Clang and the shader translator from the latest builder release.
-4. Finds the dump: first in the output folder's `game`, then in the repository's `game`.
+4. Finds the dump: first in the output folder's `game`, then in the repository's `game`, then the folder given with
+   `--dump` last time for this output folder.
 5. Builds the complete game into `dist`.
 
 If the selected output folder already has its own populated `game`, that copy takes priority. `--dump` always selects
