@@ -8,6 +8,7 @@ Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [
 --simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
 """
 import argparse
+import array
 import bisect
 import os
 import platform
@@ -25,6 +26,16 @@ from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
+PROBE_DELTA = 0x12345674   # Module.lift: changes the page and the low bits of an address
+
+
+def same_insn(x, y):
+    if (x.kind, x.code, x.target, x.cond) != (y.kind, y.code, y.target, y.cond):
+        return False
+    if x.asm is None or y.asm is None:
+        return x.asm is y.asm
+    p, q = x.asm, y.asm
+    return (p.word, p.vregs, p.gprs, p.flags, p.consts) == (q.word, q.vregs, q.gprs, q.flags, q.consts)
 
 
 def sext26(w):
@@ -48,9 +59,16 @@ class Module:
         n = self.nso
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
-        self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
+        # [TOTK] 4 bytes a word (a tuple of ints took ~36 bytes a word: ~400 MiB for main)
+        self.words = array.array('I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
+        assert self.words.itemsize == 4 and sys.byteorder == 'little'
         self.lifter = Lifter(base, simd)
-        self.cache = {}
+        # [TOTK] Lifted instructions are cached by word when the result does not depend on the address (most of
+        # them: the same word recurs), else by address. One entry per address for all of main's 11.5 M
+        # instructions needed ~4 GiB and failed with MemoryError where the commit limit was tight.
+        self.cache = {}          # address -> Insn, for words whose lifting depends on the address
+        self.by_word = {}        # word -> Insn, for words whose lifting does not
+        self.pc_words = set()    # words known to depend on the address
         self.stats = Counter()
         self.mu = None
 
@@ -60,15 +78,37 @@ class Module:
     def word(self, a):
         return self.words[(a - self.lo) // 4]
 
+    def _lift(self, w, a):
+        try:
+            return self.lifter.lift(w, a), False
+        except Unsupported as e:
+            return Insn('trap', f'rt_udf(c, {hx(a)}); /* {e} */'), True
+
     def lift(self, a):
         ins = self.cache.get(a)
-        if ins is None:
-            try:
-                ins = self.lifter.lift(self.word(a), a)
-            except Unsupported as e:
-                self.stats['unsupported'] += 1
-                ins = Insn('trap', f'rt_udf(c, {hx(a)}); /* {e} */')
+        if ins is not None:
+            return ins
+        w = self.word(a)
+        ins = self.by_word.get(w)
+        if ins is not None:
+            return ins
+        ins, unsupported = self._lift(w, a)
+        if unsupported:
+            self.stats['unsupported'] += 1
             self.cache[a] = ins
+        elif w in self.pc_words:
+            self.cache[a] = ins
+        else:
+            # the same word lifted at another address (another page, other low bits): equal means address-free
+            try:
+                other, unsupported = self._lift(w, a + PROBE_DELTA)
+            except Exception:
+                other, unsupported = None, True
+            if not unsupported and same_insn(ins, other):
+                self.by_word[w] = ins
+            else:
+                self.pc_words.add(w)
+                self.cache[a] = ins
         return ins
 
     def boundaries(self):
