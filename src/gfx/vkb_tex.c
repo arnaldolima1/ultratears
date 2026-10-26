@@ -152,8 +152,7 @@ static int same_shape(const entry *e, const tex_t *t) {
     const nvn_texdesc *a = &e->im.d, *b = &t->d;
     return e->im.storage == t->mem && a->target == b->target && a->format == b->format && a->flags == b->flags &&
            a->samples == b->samples && a->width == b->width && a->height == b->height && a->depth == b->depth &&
-           a->levels == b->levels && a->stride == b->stride && a->pkg_block_h == b->pkg_block_h && a->swizzle_r == b->swizzle_r &&
-           a->swizzle_g == b->swizzle_g && a->swizzle_b == b->swizzle_b && a->swizzle_a == b->swizzle_a &&
+           a->levels == b->levels && a->stride == b->stride && a->pkg_block_h == b->pkg_block_h &&
            e->has_layout == t->has_layout && (!t->has_layout || !memcmp(e->layout, t->layout, sizeof e->layout));
 }
 static void entry_drop(entry *e) {   // g_mu held: out of the indexes, destroyed when the GPU is done with it

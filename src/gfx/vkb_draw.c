@@ -396,8 +396,23 @@ static vkb_image *handle_image(uint64_t h, const view_t **view) {
     view_t *v = NULL;
     if (g_treg[id].has_view) { v = &views[next++ & 63]; *v = g_treg[id].v; }
     vkb_rw_read_end(&g_reg_mu);
+    vkb_image *im = vkb_image_of(&t);
+    // Texture objects over the same memory share one image whatever their swizzle (it does not change the memory): an
+    // object whose swizzle differs from the image's own gets it through its view. TOTK draws the minimap through one
+    // object and samples it through another with alpha ONE; as separate images the sampled one stayed empty.
+    const nvn_texdesc *a = im ? &im->d : NULL;
+    if (a && (!v || !v->set_swizzle) && (a->swizzle_r != t.d.swizzle_r || a->swizzle_g != t.d.swizzle_g ||
+                                         a->swizzle_b != t.d.swizzle_b || a->swizzle_a != t.d.swizzle_a)) {
+        if (!v) { v = &views[next++ & 63]; memset(v, 0, sizeof *v); }
+        int own = t.d.swizzle_r | t.d.swizzle_g | t.d.swizzle_b | t.d.swizzle_a;   // none set: identity
+        v->set_swizzle = 1;
+        v->swz[0] = own ? (uint8_t)t.d.swizzle_r : NVN_TEXTURE_SWIZZLE_R;
+        v->swz[1] = own ? (uint8_t)t.d.swizzle_g : NVN_TEXTURE_SWIZZLE_G;
+        v->swz[2] = own ? (uint8_t)t.d.swizzle_b : NVN_TEXTURE_SWIZZLE_B;
+        v->swz[3] = own ? (uint8_t)t.d.swizzle_a : NVN_TEXTURE_SWIZZLE_A;
+    }
     *view = v;
-    return vkb_image_of(&t);
+    return im;
 }
 
 // ---------------- sampled render targets ----------------
