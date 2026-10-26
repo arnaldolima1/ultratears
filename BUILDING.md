@@ -98,7 +98,7 @@ starts, but loading reads many small files, which is slower; the packed image is
 ```
 python tools/build_xlate.py
 git tag v<version>
-python tools/setup.py --output ..\release-test
+python tools/setup.py
 python tools/make_package.py
 python tools/public_tree.py --publish
 ```
@@ -107,7 +107,8 @@ The version has one source, the tag `v<x.y.z>` on the release commit (`tools/ver
 commit and the exe take it from there. The exe writes it as the first line of its log and shows it in the file's
 properties; between releases it reads like `0.1.0-3-gabc1234` (`git describe`).
 
-It needs a complete build in the game folder (`tools/setup.py --output ..\release-test`) and a clean working tree,
+It needs a complete build in the output folder (`dist\` by default; built elsewhere with `tools/setup.py --output
+<folder>`, pass `--home <folder>`) and a clean working tree,
 and writes `dev-local\dist\UltraTears-builder-<version>-windows-x86_64.zip`: the public tree of HEAD, the part of MSYS2 CLANG64 the build
 reads (measured from ninja's dependency records and the linker's trace), Python 3.14 with the packages above,
 `ultrs-shaders.exe`, `setup.bat`, and the licenses of all of it.
