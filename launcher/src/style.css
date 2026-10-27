@@ -163,7 +163,9 @@ main { position: fixed; inset: 48px 0 0 0; }
 .play.install { background: linear-gradient(180deg, #2d4a43 0%, #1c302b 100%); color: var(--zonai); border-color: var(--zonai-dim); }
 .home-status { margin: 14px 0 0; width: 100%; text-align: center; font-size: 13px; color: var(--muted); }
 .home-status b { color: var(--gold); font-weight: 600; }
-.updates { display: grid; gap: 10px; width: min(520px, 100%); margin: 18px auto 0; }
+/* right column, clear of the logo and the play button on the left */
+.updates { position: absolute; right: 56px; bottom: 88px; width: min(400px, 34vw); max-height: calc(100% - 160px);
+  overflow-y: auto; display: grid; align-content: end; gap: 10px; animation: rise 1.2s cubic-bezier(.2, .7, .2, 1) both; }
 .update-card { padding: 12px 14px; border: 1px solid rgba(232, 212, 154, 0.18); border-radius: 6px;
   background: rgba(8, 12, 11, 0.72); backdrop-filter: blur(6px); text-align: left; }
 .update-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
