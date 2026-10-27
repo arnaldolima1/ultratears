@@ -12,6 +12,8 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod game_update;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
@@ -37,6 +39,8 @@ struct Status {
     version: Option<String>,
     building: bool,
     running: bool,
+    dev: bool,
+    commit: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -151,7 +155,9 @@ fn status(app: AppHandle, procs: State<Procs>) -> Status {
         dump_ready: dump_dir.join("exefs/main").is_file() || h.join("data/romfs").is_dir(),
         packed: h.join("data/romfs/romfs.bin").is_file() && h.join("data/exefs/main").is_file(),
         temp_dump: h.join("game").join(TEMP_MARK).is_file(),
-        can_build: (python(&h).is_some() && h.join("tools/setup.py").is_file()) || source_checkout().is_some(),
+        can_build: true,   // (without the source here, game_update.rs downloads it first)
+        dev: source_checkout().is_some(),
+        commit: game_update::installed_commit(&h),
         free_gb: free_space(&h).map(|b| b as f64 / 1e9),
         dump,
         version: std::fs::read_to_string(h.join("VERSION.txt")).ok().and_then(|s| s.lines().next().map(String::from)),
@@ -278,11 +284,16 @@ fn start_build(app: AppHandle, procs: State<Procs>, dump: Option<String>, cpus: 
         return Err("A instalação já está rodando.".into());
     }
     let h = home(&app);
-    // A builder package (or a folder already made from the source): setup.py in place. Otherwise the source checkout
-    // fills the game folder (setup.py --output) and builds there.
-    let own = h.join("tools/setup.py").is_file() && h.join("deps").is_dir();
-    let src = if own { h.clone() } else { source_checkout().ok_or("Nenhum código do UltraTears para montar a pasta do jogo (ULTRATEARS_SRC).")? };
-    let Some(python) = python(&src) else {
+    // A source checkout next to the launcher (development) fills the game folder (setup.py --output) and builds there.
+    // Otherwise the folder has its own source (game_update.rs downloads it; or a builder package): setup.py in place.
+    let checkout = source_checkout();
+    let own = checkout.is_none();
+    let src = match checkout {
+        Some(c) => c,
+        None if h.join("tools/setup.py").is_file() => h.clone(),
+        None => return Err("O código do jogo ainda não foi baixado para esta pasta.".into()),
+    };
+    let Some(python) = python(&src).or_else(|| python(&h)) else {   // (a checkout has no deps\: the game folder's)
         return Err(format!("Ferramentas do build não encontradas em {}", src.join("deps").display()));
     };
     let mut cmd = Command::new(python);
@@ -685,6 +696,8 @@ fn pad_thread(app: AppHandle) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Procs::default())
         .setup(|app| {
             pad_thread(app.handle().clone());
@@ -692,7 +705,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             status, set_home, start_view, cpu_count, make_res_overlay, custom_art, read_settings, write_settings, start_build, cancel_build, launch_game, stop_game,
-            log_tail, open_path, list_extensions, install_extension, remove_extension, run_extension, remove_temp_dump, startup_status
+            log_tail, open_path, list_extensions, install_extension, remove_extension, run_extension, remove_temp_dump, startup_status,
+            game_update::game_update_check, game_update::game_update_apply
         ])
         .run(tauri::generate_context!())
         .expect("UltraTears launcher");

@@ -528,6 +528,9 @@ def main():
             say(f'\nERROR preparing the build tools: {e}')
             sys.exit(1)
         importlib.reload(toolchain)
+    # Started by an older Python (macOS: the system's, from the launcher on a new folder): again with the build's own
+    if sys.version_info < (3, 14) and toolchain.PYTHON.is_file():
+        os.execv(str(toolchain.PYTHON), [str(toolchain.PYTHON), str(pathlib.Path(__file__).resolve())] + sys.argv[1:])
     state = load_state()
     if a.dump:
         state['dump'] = str(a.dump.resolve())

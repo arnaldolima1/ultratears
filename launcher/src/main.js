@@ -4,6 +4,9 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { setLang } from './i18n.js';
+import { check as checkLauncherUpdate } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { getVersion } from '@tauri-apps/api/app';
 
 const win = getCurrentWindow();
 const $ = (s) => document.querySelector(s);
@@ -415,6 +418,7 @@ $('#dialog-log').onclick = () => invoke('open_path', { path: 'lasrecomp.log' });
 // Steps of tools/setup.py with their usual share of the time (8-core PC, README.md).
 // "extract" (a dump-source extension) only when the install starts with it: useSteps().
 const EXTRACT = ['extract', 'Extrair', 'NSP / XCI → dump', 6];
+const SOURCE = ['source', 'Baixar', 'código do jogo', 1];   // (game_update.rs: a new folder, or an update)
 const BUILD_STEPS = [
   ['check', 'Verificar', 'versão do dump', 1],
   ['romfs', 'RomFS', 'empacotar arquivos', 4],
@@ -425,8 +429,8 @@ const BUILD_STEPS = [
   ['finish', 'Concluir', 'configuração', 0.5],
 ];
 let STEPS = BUILD_STEPS, TOTAL = 0;
-function useSteps(extract) {
-  STEPS = extract ? [EXTRACT, ...BUILD_STEPS] : BUILD_STEPS;
+function useSteps(extract, source = false) {
+  STEPS = [...(source ? [SOURCE] : []), ...(extract ? [EXTRACT] : []), ...BUILD_STEPS];
   TOTAL = STEPS.reduce((a, s) => a + s[3], 0);
   build.state = STEPS.map(() => '');
   buildSteps();
@@ -479,7 +483,7 @@ function onBuildLine({ text, err }) {
     const i = STEPS.findIndex((s) => s[0] === stepLine[2]);
     for (let k = 0; k < i; k++) if (build.state[k] !== 'done') build.state[k] = 'done';
     build.step = i; build.sub = 0; build.state[i] = 'run'; build.stepStart = Date.now();
-    if (i >= 2) cleanTempDump();   // the RomFS is packed: the extracted dump is not read any more
+    if (STEPS.findIndex((s) => s[0] === 'lift') <= i) cleanTempDump();   // the RomFS is packed: the dump is not read any more
     $('#build-phase').textContent = `${STEPS[i][1]} · ${STEPS[i][2]}`;
     logLine(t, 'step');
     renderBuild();
@@ -516,7 +520,7 @@ async function startBuild(afterExtract = false) {
     setBuilding(true);
   } catch (e) { showError('Não foi possível iniciar a instalação', String(e)); }
 }
-$('#build').onclick = install;
+$('#build').onclick = () => install();
 $('#clean-dump').onchange = (e) => { prefs.cleanDump = e.target.checked; savePrefs(); };
 $('#cancel').onclick = () => invoke('cancel_build');
 $('#cpus').oninput = (e) => { $('#cpus-val').textContent = e.target.value; prefs.cpus = +e.target.value; savePrefs(); };
@@ -606,18 +610,86 @@ $('#use-ext').onclick = () => { prefs.source = 'ext'; savePrefs(); renderExtSour
 
 // Instalar: the build straight away when the game is already packed or a dump is there; otherwise the extension
 // makes the dump first (then the build follows from ext-done).
-async function install() {
+// ---------------------------------------------------------------- updates
+// The launcher's own (tauri-plugin-updater: the GitHub release's latest.json, signed) and the game's (game_update.rs:
+// newer commits of the branch than the folder's VERSION.txt). Checked once at start; each shows a card on Início.
+let gameUpdate = null, launcherUpdate = null;
+async function checkUpdates() {
+  try { launcherUpdate = await checkLauncherUpdate(); } catch { launcherUpdate = null; }   // (offline, or no release yet)
+  if (status.installed && !status.dev) {
+    try { const u = await invoke('game_update_check'); gameUpdate = u.available ? u : null; } catch { gameUpdate = null; }
+  }
+  renderUpdates();
+}
+function renderUpdates() {
+  const box = $('#updates');
+  box.textContent = '';
+  const card = (title, sub, items, label, action) => {
+    const c = document.createElement('div');
+    c.className = 'update-card';
+    const head = document.createElement('div');
+    head.className = 'update-head';
+    const t = document.createElement('div');
+    const b = document.createElement('b'); b.textContent = title;
+    const sm = document.createElement('small'); sm.textContent = sub;
+    t.append(b, sm);
+    const btn = document.createElement('button');
+    btn.className = 'gold';
+    btn.textContent = label;
+    btn.onclick = () => action(btn);
+    head.append(t, btn);
+    c.append(head);
+    if (items.length) {
+      const ul = document.createElement('ul');
+      items.slice(0, 4).forEach((x) => { const li = document.createElement('li'); li.textContent = x; ul.append(li); });
+      if (items.length > 4) { const li = document.createElement('li'); li.className = 'more'; li.textContent = `+ ${items.length - 4} mudanças`; ul.append(li); }
+      c.append(ul);
+    }
+    box.append(c);
+  };
+  if (gameUpdate) {
+    const n = gameUpdate.ahead || gameUpdate.commits.length;
+    card('Atualização do jogo', n === 1 ? '1 mudança nova' : `${n} mudanças novas`, gameUpdate.commits, 'Atualizar',
+      () => { if (!status.building) install(gameUpdate); });
+  }
+  if (launcherUpdate) {
+    const notes = (launcherUpdate.body || '').split('\n').map((l) => l.replace(/^[-*]\s*/, '').trim()).filter(Boolean);
+    card(`Launcher ${launcherUpdate.version}`, 'Nova versão do launcher', notes, 'Atualizar launcher', async (btn) => {
+      btn.disabled = true;
+      let got = 0, size = 0;
+      try {
+        await launcherUpdate.downloadAndInstall((ev) => {
+          if (ev.event === 'Started') size = ev.data.contentLength || 0;
+          if (ev.event === 'Progress') { got += ev.data.chunkLength; btn.textContent = size ? `${Math.round((got / size) * 100)}%` : '…'; }
+        });
+        await relaunch();
+      } catch (e) { btn.disabled = false; btn.textContent = 'Atualizar launcher'; showError('Não foi possível atualizar o launcher', String(e)); }
+    });
+  }
+}
+
+// The game's source first when the folder has none yet or an update was asked for (game_update.rs), then the
+// extension's extraction when the dump is still to be made, then the build.
+async function install(update = null) {
   await refresh();
   const e = installSource();
   // (with the extension: only a dump it finished, TEMP_MARK; a partial one is resumed by running it again)
-  if (status.packed || (e ? status.temp_dump : true)) { logEl.textContent = ''; return startBuild(); }
-  const chosen = prefs.ext[e.id] || {};
-  const missing = e.inputs.find((i) => !(chosen[i.key] || []).length);
-  if (missing) return showError('Falta escolher', missing.label);
-  useSteps(true);
-  build.start = build.stepStart = Date.now(); build.step = 0; build.sub = 0; build.state[0] = 'run';
+  const extract = !(status.packed || (e ? status.temp_dump : true));
+  const chosen = e ? prefs.ext[e.id] || {} : {};
+  if (extract) {
+    const missing = e.inputs.find((i) => !(chosen[i.key] || []).length);
+    if (missing) return showError('Falta escolher', missing.label);
+  }
+  const source = !status.dev && (!!update || !status.tools);
+  useSteps(extract, source);
+  build.start = Date.now();
   $('.bar').classList.remove('error');
   logEl.textContent = '';
+  showView('install');
+  if (source && !(await fetchSource(update && update.remote))) return;
+  if (!extract) return startBuild(true);
+  const xi = STEPS.indexOf(EXTRACT);
+  build.stepStart = Date.now(); build.step = xi; build.sub = 0; build.state[xi] = 'run';
   $('#build-phase').textContent = `${EXTRACT[1]} · ${e.name}`;
   $('#build-activity').textContent = 'Lendo os pacotes…';
   renderBuild();
@@ -627,6 +699,44 @@ async function install() {
     setBuilding(true);
   } catch (err) { showError('Não foi possível iniciar a extração', String(err)); }
 }
+
+// Downloads the source of commit `sha` (default: the newest of the branch) over the game folder. true when done.
+let sourceWait = null;
+async function fetchSource(sha) {
+  const si = STEPS.indexOf(SOURCE);
+  build.stepStart = Date.now(); build.step = si; build.sub = 0; build.state[si] = 'run';
+  $('#build-phase').textContent = `${SOURCE[1]} · ${SOURCE[2]}`;
+  $('#build-activity').textContent = 'Consultando o GitHub…';
+  renderBuild();
+  setBuilding(true);
+  try {
+    if (!sha) sha = (await invoke('game_update_check')).remote;
+    const done = new Promise((resolve) => (sourceWait = resolve));
+    await invoke('game_update_apply', { sha });
+    const err = await done;
+    if (err) throw err;
+    build.state[si] = 'done'; build.sub = 1;
+    logLine(`Código do jogo: commit ${sha.slice(0, 7)}`, 'step');
+    renderBuild();
+    gameUpdate = null;
+    renderUpdates();
+    return true;
+  } catch (err) {
+    build.state[si] = 'fail';
+    $('.bar').classList.add('error');
+    $('#build-phase').textContent = 'Erro';
+    renderBuild();
+    showError('Não foi possível baixar o jogo', String(err));
+    return false;
+  } finally {
+    setBuilding(false);
+  }
+}
+listen('update-progress', ({ payload: { text, done, total } }) => {
+  $('#build-activity').textContent = done ? `${text} · ${(done / 1e6).toFixed(1)}${total ? ` de ${(total / 1e6).toFixed(1)}` : ''} MB` : text;
+  if (total) { build.sub = Math.min(1, done / total); renderBuild(); }
+});
+listen('update-done', ({ payload }) => { if (sourceWait) { sourceWait(payload); sourceWait = null; } });
 
 let cleaning = false;
 async function cleanTempDump() {
@@ -656,15 +766,16 @@ listen('ext-line', ({ payload: { text, err } }) => {
 listen('ext-done', async ({ payload: code }) => {
   extRun = null;
   setBuilding(false);
+  const xi = STEPS.indexOf(EXTRACT);
   if (code !== 0) {
-    build.state[0] = 'fail';
+    build.state[xi] = 'fail';
     $('.bar').classList.add('error');
     $('#build-phase').textContent = code === 1 ? 'Erro na extração' : 'Cancelado';
     renderBuild();
     if (code === 1) showError('A extração parou', [...logEl.childNodes].slice(-14).map((n) => n.textContent).join(''));
     return;
   }
-  build.state[0] = 'done'; build.sub = 1;
+  build.state[xi] = 'done'; build.sub = 1;
   renderBuild();
   startBuild(true);
 });
@@ -866,4 +977,7 @@ $('#set-intro').onchange = (e) => { prefs.intro = e.target.checked; savePrefs();
   applyMusic();
   const view = await invoke('start_view');
   if (view && $(`#view-${view}`)) showView(view);
+  const lv = await getVersion();
+  $('#about-versions').textContent = `Launcher ${lv}` + (status.commit ? ` · jogo: commit ${status.commit}` : '');
+  checkUpdates();
 })();

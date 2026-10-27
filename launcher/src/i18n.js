@@ -303,6 +303,27 @@ const EN = {
     'Nothing of the game comes with the port: everything is made on your PC from your own dump and must stay here. Not affiliated with or endorsed by Nintendo.',
   'são marcas da Nintendo.': 'are trademarks of Nintendo.',
 
+  // updates (game_update.rs, the launcher's updater)
+  'Baixar': 'Download',
+  'código do jogo': 'game source',
+  'Consultando o GitHub…': 'Asking GitHub…',
+  'Não foi possível baixar o jogo': 'Could not download the game',
+  'Atualização do jogo': 'Game update',
+  '1 mudança nova': '1 new change',
+  'Atualizar': 'Update',
+  'Nova versão do launcher': 'New launcher version',
+  'Atualizar launcher': 'Update launcher',
+  'Não foi possível atualizar o launcher': 'Could not update the launcher',
+  'Atualizando os arquivos…': 'Updating the files…',
+  'Procurando as ferramentas do build…': 'Looking for the build tools…',
+  'Instalando as ferramentas do build…': 'Installing the build tools…',
+  'Baixando o código do jogo': 'Downloading the game source',
+  'Baixando as ferramentas do build': 'Downloading the build tools',
+  'O código do jogo ainda não foi baixado para esta pasta.': 'The game source has not been downloaded to this folder yet.',
+  'O GitHub limitou as consultas deste IP por agora; tente de novo em alguns minutos.': 'GitHub is limiting requests from this IP for now; try again in a few minutes.',
+  'Nenhum pacote de ferramentas do build foi encontrado nos releases do UltraTears.': 'No build tools package was found in the UltraTears releases.',
+  'O pacote de ferramentas não trouxe o Python do build.': 'The tools package did not include the build\'s Python.',
+
   // messages from the launcher's back end (src-tauri)
   'Essa pasta não tem o UltraTears (tools/setup.py ou o jogo).': 'This folder has no UltraTears (tools/setup.py or the game).',
   'A instalação já está rodando.': 'The installation is already running.',
@@ -329,6 +350,15 @@ const PATTERNS = [
   [/^id de extensão inválido: (.+)$/, (m, a) => `invalid extension id: ${a}`],
   [/^(.+) foi adicionada, mas não tem programa para este sistema \((.+)\)$/, (m, a, b) => `${a} was added, but has no program for this system (${b})`],
   [/^Escolha: (.+)$/, (m, a) => `Choose: ${a}`],
+  [/^(\d+) mudanças novas$/, (m, a) => `${a} new changes`],
+  [/^\+ (\d+) mudanças$/, (m, a) => `+ ${a} more changes`],
+  [/^Launcher (\S+) · jogo: commit (\w+)$/, (m, a, b) => `Launcher ${a} · game: commit ${b}`],
+  [/^(Baixando o código do jogo|Baixando as ferramentas do build) · ([\d.]+)(?: de ([\d.]+))? MB$/,
+    (m, a, b, c) => `${EN[a]} · ${b}${c ? ` of ${c}` : ''} MB`],
+  [/^Sem conexão com o GitHub: (.+)$/, (m, a) => `No connection to GitHub: ${a}`],
+  [/^Download interrompido: (.+)$/, (m, a) => `Download interrupted: ${a}`],
+  [/^Arquivo baixado inválido: (.+)$/, (m, a) => `Invalid downloaded file: ${a}`],
+  [/^commit inválido: (.+)$/, (m, a) => `invalid commit: ${a}`],
 ];
 
 const ATTRS = ['title', 'placeholder', 'aria-label'];

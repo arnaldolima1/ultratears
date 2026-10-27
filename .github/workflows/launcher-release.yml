@@ -1,0 +1,62 @@
+# The launcher's installers and its update feed (fork). A tag launcher-v<version> (the version in
+# launcher/src-tauri/tauri.conf.json) builds the macOS .dmg (Apple silicon) and the Windows setup .exe, signs the update
+# packages with the TAURI_SIGNING_PRIVATE_KEY secret and publishes them in a release with latest.json, which the
+# installed launchers read (plugins.updater in tauri.conf.json).
+name: Launcher release
+
+on:
+  push:
+    tags: ['launcher-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: launcher/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: launcher/src-tauri -> target
+
+      - run: npm ci
+        working-directory: launcher
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: launcher
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.ref_name }}
+          releaseName: UltraTears Launcher ${{ github.ref_name }}
+          releaseBody: |
+            Instaladores do UltraTears Launcher. / UltraTears Launcher installers.
+            - macOS (Apple silicon): .dmg
+            - Windows: _x64-setup.exe
+            Launchers já instalados se atualizam sozinhos. / Installed launchers update themselves.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
