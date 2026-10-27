@@ -168,6 +168,13 @@ class Module:
         if r is not None and s is not None:
             self.stats['jumptables_single_target_rescanned'] += 1
             return sorted(set(r) | set(s))
+        # A single target the image scan cannot confirm is a guess (main 0x8006eb84c: a byte table of 7 targets whose
+        # register is reused before the br, so the scan misses its adrp/add and the emulation reads one entry at the
+        # scratch address; loading a save then ran into "no function at 8006eb850", GitHub issue #18). No table: the
+        # br takes the computed-target fallback over all of the function's labels.
+        if s is None and r is not None and len(set(r)) <= 1:
+            self.stats['jumptables_single_unconfirmed'] += 1
+            return None
         return r if r is not None else s
 
     def _jump_table_scan(self, br_pc, entry, end):
