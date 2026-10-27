@@ -1593,6 +1593,8 @@ void vkb_draw(const uint8_t *a, int indexed) {
                  S.has_dr ? "set" : "-", S.dr[0], S.dr[1], S.nvp ? S.vp[0][4] : 0.0f, S.nvp ? S.vp[0][5] : 1.0f,
                  S.has_poly && (S.poly.offset_en & 4) ? "on" : "off", S.po.units, S.po.factor, S.po.clamp, S.depth_clamp,
                  r->depth ? "yes" : "no", r->depth ? r->depth->d.format : 0);
+            VLOG("[draw]   viewports %d: 0 at %g,%g size %gx%g | scissor %s %d,%d %dx%d", S.nvp, S.nvp ? S.vp[0][0] : 0.0f, S.nvp ? S.vp[0][1] : 0.0f,
+                 S.nvp ? S.vp[0][2] : 0.0f, S.nvp ? S.vp[0][3] : 0.0f, S.has_sc ? "set" : "-", S.sc.x, S.sc.y, S.sc.w, S.sc.h);
         }
         {   // vertex input: attributes (stream, offset, NVN format) and the streams' buffers; the index buffer
             char vl[1024];

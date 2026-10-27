@@ -1267,8 +1267,19 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
         if (im && im->refresh_from) vkb_tex_refresh(cb, im);   // newer contents at this memory in another size (not in a pass yet)
         if (!im || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT || !vkb_view(im, v, 1, -1)) {
             if (im) vkb_audit(A_RT_NOT_ATTACHABLE, NULL);
-            if (im) { static int said; if (said++ < 4) VLOG("[temporary] texture %llu (format %#x) as a render target: not attachable (compressed)",
-                                                            (unsigned long long)im->serial, im->d.format); }
+            if (im) {   // once per texture: which views of which textures (GPU compression into block-sized texels, L19)
+                static uint64_t seen[64];
+                static int nseen;
+                int k = 0;
+                while (k < nseen && seen[k] != im->serial) k++;
+                if (k == nseen && nseen < 64) {
+                    seen[nseen++] = im->serial;
+                    VLOG("[temporary] texture %llu (format %#x %ux%u levels %u at %p) as a render target: not attachable (compressed); view %s%#x level %d, present %llu",
+                         (unsigned long long)im->serial, im->d.format, im->width, im->height, im->levels, (const void *)im->storage,
+                         v && v->set_format ? "format " : "no format ", v && v->set_format ? v->format : 0, v && v->set_levels ? v->base_level : 0,
+                         (unsigned long long)vkb_frame());
+                }
+            }
             continue;
         }
         int loop = (fb >> i) & 1;
@@ -1343,20 +1354,22 @@ static void trace_tex(const char *what, int i, const tex_t *t, const view_t *v) 
 // TOTK_RT_LOG=<NVN format>:<width>x<height> (development): render targets of that format and size, once per texture
 // serial and level, with their memory and shape; and draws into one that conditional rendering skipped (terrain tiles
 // baked into 0xd:260x260 targets, L19).
-static int rt_log_match(const tex_t *t) {
+int vkb_rt_log_d(const nvn_texdesc *d) {   // TOTK_RT_LOG matches this descriptor (also copies, clears, uploads)
     static int fmt = -2;
     static unsigned w, h;
     if (fmt == -2) { const char *e = getenv("TOTK_RT_LOG"); fmt = e && sscanf(e, "%i:%ux%u", &fmt, &w, &h) == 3 ? fmt : -1; }
-    return fmt >= 0 && t && (int)t->d.format == fmt && t->d.width == w && t->d.height == h;
+    return fmt >= 0 && d && (int)d->format == fmt && d->width == w && d->height == h;
 }
+int vkb_rt_log_match(const tex_t *t) { return t && vkb_rt_log_d(&t->d); }
 static void rt_log(int skipped) {
     static uint64_t seen[8192];
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     for (int i = 0; i < g_rt.n && i < 8; i++) {
         const tex_t *t = g_rt.color[i];
-        if (!rt_log_match(t)) continue;
+        if (!vkb_rt_log_match(t)) continue;
         unsigned level = g_rt.has_cview[i] && g_rt.cview[i].set_levels ? (unsigned)g_rt.cview[i].base_level : 0;
-        uint64_t k = (t->serial << 5 | level) << 1 | (uint64_t)skipped;
+        // once per texture, level and present (a target drawn again later, as when a save loads, shows again)
+        uint64_t k = ((t->serial << 5 | level) << 1 | (uint64_t)skipped) * 0x100000001B3ull ^ vkb_frame();
         pthread_mutex_lock(&mu);
         int dup = 0;
         for (unsigned j = (unsigned)(k * 0x9E3779B97F4A7C15ull >> 51), n = 0; n < 8192; j = (j + 1) & 8191, n++) {
@@ -1456,6 +1469,7 @@ static void clear_tex(const p_clear_tex *c) {
     pass_end_why(PE_CLEAR_TEX);
     vkb_image *im = vkb_image_of(c->tex);
     if (!im) return;
+    if (vkb_rt_log_match(c->tex)) VLOG("[rtlog] clear texture %llu (image %llu), present %llu", (unsigned long long)c->tex->serial, (unsigned long long)im->serial, (unsigned long long)vkb_frame());
     VkCommandBuffer cb = vkb_cmd();
     const view_t *v = c->has_view ? &c->view : NULL;
     uint32_t level = v && v->set_levels ? v->base_level : 0, layer = v && v->set_layers ? v->min_layer : 0;

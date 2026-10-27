@@ -152,6 +152,8 @@ void vkb_vcheck_add(uint64_t addr, uint64_t len, uint32_t draw, int kind);   // 
 void vkb_tex_vcheck_add(const vkb_image *im);   // F9: a texture a traced draw samples (vkb_tex.c)
 void vkb_tex_vcheck_run(void);              // F9: those textures compared with game memory
 void vkb_tex_b2b_log(uint64_t src, uint64_t dst, uint64_t n);   // TOTK_B2B_LOG: buffer copies over GPU-written images
+int vkb_rt_log_match(const tex_t *t);       // TOTK_RT_LOG: the format and size being logged (backend_vk.c)
+int vkb_rt_log_d(const nvn_texdesc *d);
 void vkb_tex_dump(const char *dir);         // TOTK_DUMP: the GPU-written images as BMP (development)       // the game finalized the texture: image freed after the GPU is done
 
 // ---- vkb_draw.c: render state, texture / sampler pools, draws

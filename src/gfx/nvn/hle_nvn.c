@@ -1929,6 +1929,7 @@ static void *x_thread(void *unused) {
             if (per && rt != per) { rt = per; void set_time_constraint_comp_x(uint64_t, uint64_t); set_time_constraint_comp_x(per, per / 2); }
             present_exec(j.win, j.idx, j.period, j.crop, j.frame);
             void vkb_tex_writeback_frame(void); vkb_tex_writeback_frame();   // GPU-drawn contents into game memory (vkb_tex.c)
+            void vkb_tex_rtlog_frame(void); vkb_tex_rtlog_frame();           // TOTK_RT_LOG: how full the logged targets are
         }
         pthread_mutex_lock(&g_xq_mu);
         if (j.kind == XJ_SUBMIT) { g_xsub_fence[j.sub % XF] = mtl_last_fence(); g_xsub_done = j.sub; }
