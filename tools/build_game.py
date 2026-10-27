@@ -42,7 +42,7 @@ GFX = ['src/gfx/nvn/hle_nvn.c', 'src/gfx/nvn/nvn_tex.c', 'src/gfx/nvn/totk_nvn_e
 GFX_INCLUDES = '-Isrc/gfx -Isrc/gfx/nvn -Isrc/gfx/nvn/include' + ('' if MAC else ' -Isrc/gfx/compat')
 LIBS_WIN = '-static -Wl,--subsystem,windows -Wl,--error-limit=0 -Wl,--disable-high-entropy-va -pthread -ldbghelp -lwinmm -lsynchronization -lshell32 -lopus -lvpx -lSDL3 -liconv' \
        ' -luser32 -lgdi32 -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -ldinput8 -lbcrypt -lc++'
-LIBS_MAC = f'-L{toolchain.HOMEBREW}/lib -lSDL3 -lopus -lvpx -liconv -lc++ -framework CoreFoundation'
+LIBS_MAC = f'-L{toolchain.HOMEBREW}/lib -lSDL3 -lopus -lvpx -liconv -lc++ -lobjc -framework CoreFoundation -framework AppKit'
 LIBS = LIBS_MAC if MAC else LIBS_WIN
 CFLAGS = (f'-O2 -mcpu=apple-m1 -g -fno-strict-aliasing -D_FILE_OFFSET_BITS=64 -I{toolchain.HOMEBREW}/include' if MAC else
           '-O2 -march=x86-64-v3 -g -gcodeview -fno-strict-aliasing -D_FILE_OFFSET_BITS=64')

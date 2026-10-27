@@ -417,6 +417,8 @@ fn launch_game(app: AppHandle, procs: State<Procs>, rect: (i32, i32, i32, i32), 
     thread::spawn(move || {
         for _ in 0..(10 * 60 * 10) {   // up to 10 minutes for the first frame
             if has_visible_window(pid, &game_home) {
+                #[cfg(target_os = "macos")]   // one Dock icon: the game's now (it enters the Dock with its window)
+                let _ = watcher.set_dock_visibility(false);
                 let _ = watcher.emit("game-visible", ());
                 return;
             }
@@ -429,6 +431,8 @@ fn launch_game(app: AppHandle, procs: State<Procs>, rect: (i32, i32, i32, i32), 
     thread::spawn(move || {
         let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
         *app.state::<Procs>().game.lock().unwrap() = None;
+        #[cfg(target_os = "macos")]
+        let _ = app.set_dock_visibility(true);
         let _ = app.emit("game-exit", code);
     });
     Ok(())

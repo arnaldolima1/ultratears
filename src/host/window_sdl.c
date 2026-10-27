@@ -135,6 +135,25 @@ void runtime_rumble_set(unsigned side, float amp_low, float freq_low, float amp_
     SDL_UnlockMutex(pad_lock);
 }
 
+#ifdef __APPLE__
+#include <objc/message.h>
+#include <objc/runtime.h>
+// (fork) One Dock icon at a time: started by the launcher (TOTK_START_HIDDEN) the game stays out of the Dock while
+// the launcher's window stands in for it (SDL_HINT_MAC_BACKGROUND_APP), and comes in with its window, with the port's
+// icon (assets/icon.ico; a bare executable gets the generic "exec" one). The launcher leaves the Dock then.
+static id objc_send(id obj, const char *sel) { return ((id (*)(id, SEL))objc_msgSend)(obj, sel_registerName(sel)); }
+static void mac_dock_show(void) {
+    id app = objc_send((id)objc_getClass("NSApplication"), "sharedApplication");
+    ((BOOL (*)(id, SEL, long))objc_msgSend)(app, sel_registerName("setActivationPolicy:"), 0);   // Regular
+    id path = ((id (*)(id, SEL, const char *))objc_msgSend)((id)objc_getClass("NSString"),
+                                                            sel_registerName("stringWithUTF8String:"), "assets/icon.ico");
+    id img = ((id (*)(id, SEL, id))objc_msgSend)(objc_send((id)objc_getClass("NSImage"), "alloc"),
+                                                 sel_registerName("initWithContentsOfFile:"), path);
+    if (img) ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("setApplicationIconImage:"), img);
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(app, sel_registerName("activateIgnoringOtherApps:"), YES);
+}
+#endif
+
 int window_init(void) {
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");   // 10 ms device buffer at 48 kHz
@@ -145,6 +164,7 @@ int window_init(void) {
     if (!getenv("SDL_VULKAN_LIBRARY"))
         for (const char *const *p = (const char *const[]){"/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib", NULL}; *p; p++)
             if (access(*p, R_OK) == 0) { SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, *p); break; }
+    if (env_on("TOTK_START_HIDDEN")) SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
 #endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         fprintf(stderr, "[totk] SDL: %s\n", SDL_GetError());
@@ -159,6 +179,9 @@ int window_init(void) {
     if (env_on("TOTK_BORDERLESS")) flags |= SDL_WINDOW_BORDERLESS;
     window = SDL_CreateWindow("UltraTears", 1280, 720, flags);
     if (!window) { fprintf(stderr, "[totk] window: %s\n", SDL_GetError()); return 0; }
+#ifdef __APPLE__
+    if (!hidden_until_frame) mac_dock_show();
+#endif
     int x, y, w, h;
     const char *geo = getenv("TOTK_WINDOW");
     if (geo && sscanf(geo, "%d,%d,%d,%d", &x, &y, &w, &h) == 4 && w > 0 && h > 0) {
@@ -354,6 +377,9 @@ _Noreturn void window_loop(void) {
         if (hidden_until_frame && vkp_game_shown() && !startup_holding()) {
             hidden_until_frame = false;
             startup_status("ready\n");
+#ifdef __APPLE__
+            mac_dock_show();
+#endif
             SDL_ShowWindow(window);
             SDL_RaiseWindow(window);
         }
