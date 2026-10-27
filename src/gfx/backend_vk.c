@@ -230,7 +230,8 @@ static const pool_ent *pool_find(uintptr_t addr, uint64_t len) {   // g_pool_mu 
 //  - GPU writes (shader stores, buffer copies, uniform updates, texture-to-buffer copies) go to the copy and are copied
 //    back to game memory at the end of the submission, through host memory and the retire thread (wb_merge), which
 //    leaves alone the pages the CPU wrote meanwhile (the CPU reads the results after the game's wait).
-//    [temporary] Page granularity: GPU writes into a page the CPU also wrote are lost (counted in the log line).
+//    In a page the CPU also wrote, the GPU gets the bytes the CPU left unchanged (snap_take, wb_bytes); without a
+//    snapshot (the CPU wrote there before the GPU write was recorded) the page stays the CPU's (counted in the log line).
 // Pages the copy back writes are not CPU writes; were the write watch to count them, they would only be copied in again.
 // The game writes memory for a submission before it is submitted, and does not overwrite what the GPU still reads (it
 // waits for the GPU first), so bringing a copy up to date early (ahead, or for the whole pool) does not change results.
@@ -340,8 +341,92 @@ static int sync_gather(pool_ent *p, uint64_t sub, int may_end) {
     p->sync_sub = sub;
     return 1;
 }
+// What a GPU write's range held before it, for wb_merge: in a page the CPU also wrote, the GPU gets every byte the CPU
+// left unchanged (game memory still equal to "before") instead of the whole page going to the CPU. Page by page, the
+// GPU's writes next to the CPU's were lost (about 20 pages a frame on the Great Sky Island) and the stale bytes came back
+// into the copy at its next update: the game makes vertex data on the GPU in buffers it also writes from the CPU, and
+// meshes got stray vertices (L13 in dev-local/docs/issues.md).
+// "Before" comes from the copy itself, copied on the GPU just ahead of the write into host memory of the slot (bf_*): it
+// is game memory as of the copy's last update, whatever the CPU writes meanwhile (the game writes the next frame while
+// this one is recorded). Where the CPU has not written the range's pages since the update, game memory is "before"
+// itself and is copied on the CPU (no GPU copy, no barriers); in a pass on one recording thread with pages the CPU
+// wrote (no copy possible there), the page rule stays.
+typedef struct wb_snap_s { uint64_t addr, len; uint8_t *data; int owned; } wb_snap_t;
+static wb_snap_t *g_snaps;   // this submission's (shadow_writeback hands them to its retire job)
+static int g_nsnaps, g_capsnaps;
+static uint64_t g_snap_bytes;
+enum { BF_CAP = 16u << 20 };
+typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; } bfst_t;
+static bfst_t g_bfst[VKB_SLOTS];   // per slot: "before" copies, read by the retire thread once the submission is done
+static VkDeviceSize g_bf_used;     // in the current submission's slot
+static uint8_t *bf_map(int slot, VkBuffer *buf) {
+    bfst_t *b = &g_bfst[slot];
+    if (!b->map) {
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = BF_CAP, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &b->buf), "copy back before-buffer")) return NULL;
+        VkMemoryRequirements req;
+        vk.vkGetBufferMemoryRequirements(vkc.device, b->buf, &req);
+        uint32_t type = UINT32_MAX, want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (int pass = 0; pass < 2 && type == UINT32_MAX; pass++)   // cached first: the CPU reads it
+            for (uint32_t i = 0; i < vkc.memory.memoryTypeCount && type == UINT32_MAX; i++) {
+                VkMemoryPropertyFlags f = vkc.memory.memoryTypes[i].propertyFlags;
+                if ((req.memoryTypeBits & (1u << i)) && (f & want) == want && (pass || (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))) type = i;
+            }
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+        void *m;
+        if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &b->mem), "copy back before-memory")) {
+            vk.vkDestroyBuffer(vkc.device, b->buf, NULL); b->buf = VK_NULL_HANDLE; return NULL;
+        }
+        vk.vkBindBufferMemory(vkc.device, b->buf, b->mem, 0);
+        if (!vk_check(vk.vkMapMemory(vkc.device, b->mem, 0, VK_WHOLE_SIZE, 0, &m), "copy back before-map")) return NULL;
+        b->map = m;
+    }
+    *buf = b->buf;
+    return b->map;
+}
+static wb_snap_t *snap_new(uint64_t addr, uint64_t len) {   // NULL: the same range already has one
+    for (int k = g_nsnaps - 1; k >= 0 && k >= g_nsnaps - 8; k--)
+        if (g_snaps[k].addr == addr && g_snaps[k].len == len) return NULL;   // written again: the first "before" counts
+    if (g_nsnaps == g_capsnaps) {
+        g_capsnaps = g_capsnaps ? g_capsnaps * 2 : 256;
+        if (!(g_snaps = realloc(g_snaps, sizeof *g_snaps * (size_t)g_capsnaps))) die("copy back snapshots");
+    }
+    wb_snap_t *s = &g_snaps[g_nsnaps++];
+    *s = (wb_snap_t){addr, len, NULL, 0};
+    return s;
+}
+static void snap_take(const pool_ent *p, uint64_t addr, uint64_t len) {
+    VkDeviceSize n = (len + 15) & ~(VkDeviceSize)15;
+    VkBuffer bf;
+    uint8_t *map;
+    int cpu_wrote = nvn_dirty_since((const void *)(uintptr_t)addr, len, p->stamp);   // else game memory is "before" itself
+    if (cpu_wrote && (t_recording || !vkb_in_pass()) && g_bf_used + n <= BF_CAP && (map = bf_map(vkb_slot(), &bf))) {
+        wb_snap_t *s = snap_new(addr, len);
+        if (!s) return;
+        s->data = map + g_bf_used;
+        if (t_recording) vkb_pro_begin();   // threads recording: in the prologue, after the copy's update there
+        VkCommandBuffer cb = vkb_cmd();
+        shadow_barrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferCopy r = {p->soff + (addr - p->base), g_bf_used, len};
+        vk.vkCmdCopyBuffer(cb, p->sbuf, bf, 1, &r);
+        shadow_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_HOST_READ_BIT);
+        if (t_recording) vkb_pro_end();
+        g_bf_used += n;
+        return;
+    }
+    if (cpu_wrote) return;   // and no copy possible: the page rule
+    if (g_snap_bytes + len > (64u << 20)) return;   // a bound: GPU writes per submission are far below it
+    wb_snap_t *s = snap_new(addr, len);
+    if (!s) return;
+    if (!(s->data = malloc(len))) die("copy back snapshot");
+    memcpy(s->data, (const void *)(uintptr_t)addr, len);
+    s->owned = 1;
+    g_snap_bytes += len;
+}
 static void wb_add(pool_ent *p, uint64_t addr, uint64_t len) {   // a GPU write to p's copy
     p->wb_sub = g_fence + 1;
+    snap_take(p, addr, len);
     VkDeviceSize o = addr - p->base;
     if (g_nwb && g_wb[g_nwb - 1].dst == p->buf && o <= g_wb[g_nwb - 1].doff + g_wb[g_nwb - 1].n && g_wb[g_nwb - 1].doff <= o + len) {
         wb_t *w = &g_wb[g_nwb - 1];   // overlaps or touches the last one: merged
@@ -374,6 +459,9 @@ static wbst_t g_wbst[VKB_SLOTS];
 static uint64_t *g_wb_ranges;   // per range of the last shadow_writeback: guest address, bytes, stamp, offset in the slot's memory
 static int g_wb_nranges;
 static uint64_t g_wb_kept_pages, g_wb_pages;   // pages left to the CPU's writes / all pages copied back (the log line)
+static uint64_t g_wb_byte_pages;               // pages both wrote, merged byte by byte (wb_bytes)
+static wb_snap_t *g_wb_snaps;                  // the last shadow_writeback's snapshots, for its retire job
+static int g_wb_nsnaps;
 static uint8_t *wbst_get(int slot, VkDeviceSize need, VkBuffer *buf) {   // the slot's host memory, at least need bytes
     wbst_t *s = &g_wbst[slot];
     if (s->cap < need) {
@@ -409,7 +497,22 @@ static void wb_put(uint64_t a, const uint8_t *src, uint64_t n) {
     memcpy((void *)(uintptr_t)a, src, n);
     nvn_dirty_gpu_write_end(tok);
 }
-static void wb_merge(const uint64_t *r, int n, const uint8_t *src) {
+// Page [p, e) the CPU wrote since the copy was current: the GPU's bytes (gpu: its byte p) where game memory still holds
+// what a snapshot saw; 1 if a snapshot covered any of it.
+static int wb_bytes(uint64_t p, uint64_t e, const uint8_t *gpu, const wb_snap_t *s, int ns) {
+    void *tok = NULL;
+    for (int k = 0; k < ns; k++) {
+        uint64_t lo = s[k].addr > p ? s[k].addr : p, hi = s[k].addr + s[k].len < e ? s[k].addr + s[k].len : e;
+        if (lo >= hi) continue;
+        if (!tok) tok = nvn_dirty_gpu_write_begin((void *)(uintptr_t)p, e - p);
+        uint8_t *g = (uint8_t *)(uintptr_t)lo;
+        const uint8_t *was = s[k].data + (lo - s[k].addr), *now = gpu + (lo - p);
+        for (uint64_t b = 0; b < hi - lo; b++) if (g[b] == was[b]) g[b] = now[b];
+    }
+    if (tok) nvn_dirty_gpu_write_end(tok);
+    return tok != NULL;
+}
+static void wb_merge(const uint64_t *r, int n, const uint8_t *src, const wb_snap_t *snaps, int nsnaps) {
     for (int k = 0; k < n; k++, r += 4) {
         uint64_t a = r[0], len = r[1], stamp = r[2];
         if (!nvn_dirty_since((const void *)(uintptr_t)a, len, stamp)) { wb_put(a, src + r[3], len); g_wb_pages += (len + 4095) / 4096; continue; }
@@ -417,8 +520,15 @@ static void wb_merge(const uint64_t *r, int n, const uint8_t *src) {
             uint64_t e = ((p >> 12) + 1) << 12;
             if (e > a + len) e = a + len;
             g_wb_pages++;
-            if (nvn_dirty_since((const void *)(uintptr_t)p, e - p, stamp)) g_wb_kept_pages++;
-            else wb_put(p, src + r[3] + (p - a), e - p);
+            if (nvn_dirty_since((const void *)(uintptr_t)p, e - p, stamp)) {
+                if (wb_bytes(p, e, src + r[3] + (p - a), snaps, nsnaps)) { g_wb_byte_pages++; p = e; continue; }
+                g_wb_kept_pages++;
+                static int logged, want = -1;   // TOTK_WB_LOG=1 (development): which GPU writes the CPU's pages replaced
+                if (want < 0) want = getenv("TOTK_WB_LOG") != NULL;
+                if (want && logged++ < 2000)
+                    VLOG("[wb] GPU write %#llx+%llu: page %#llx kept for the CPU's writes (frame %llu)", (unsigned long long)a,
+                         (unsigned long long)len, (unsigned long long)p, (unsigned long long)vkb_frame());
+            } else wb_put(p, src + r[3] + (p - a), e - p);
             p = e;
         }
     }
@@ -426,6 +536,8 @@ static void wb_merge(const uint64_t *r, int n, const uint8_t *src) {
 static void shadow_writeback(VkCommandBuffer cb) {   // end of a submission: GPU writes to the slot's host memory
     vkb_rw_write(&g_pool_mu, LK_POOLS);
     g_wb_ranges = NULL; g_wb_nranges = 0;
+    g_wb_snaps = g_snaps; g_wb_nsnaps = g_nsnaps;   // taken by the job (also with no range: then only freed)
+    g_snaps = NULL; g_nsnaps = g_capsnaps = 0; g_snap_bytes = 0; g_bf_used = 0;
     if (g_nwb) {
         qsort(g_wb, (size_t)g_nwb, sizeof *g_wb, wb_cmp);
         int m = 0;   // overlapping ranges of one pool merged
@@ -540,7 +652,7 @@ static int g_npost, g_capost;
 static uint64_t g_op_count[OP_COUNT_];
 static int g_op_said[OP_COUNT_];
 
-typedef struct job { uint64_t fence; post_op *ops; int n; int slot; uint64_t *wb; int nwb; struct job *next; } job;
+typedef struct job { uint64_t fence; post_op *ops; int n; int slot; uint64_t *wb; int nwb; struct job *next; struct wb_snap_s *snaps; int nsnaps; } job;
 static job *g_jobs, **g_jobs_tail = &g_jobs;
 
 static void run_posts(const post_op *ops, int n) {
@@ -662,7 +774,9 @@ static void *retire_thread(void *unused) {
         VkResult r = vk.vkWaitSemaphores(vkc.device, &wi, UINT64_MAX);
         if (r != VK_SUCCESS) { vk_check(r, "vkWaitSemaphores"); checkpoint_report(); die("GPU submission %llu lost", (unsigned long long)j->fence); }
         if (totk_tl_on()) gpu_span(j->slot, j->fence);   // TOTK_TIMELINE: when the GPU ran this command buffer
-        if (j->wb) { wb_merge(j->wb, j->nwb, g_wbst[j->slot].map); free(j->wb); }   // GPU writes into game memory
+        if (j->wb) { wb_merge(j->wb, j->nwb, g_wbst[j->slot].map, (const wb_snap_t *)j->snaps, j->nsnaps); free(j->wb); }   // GPU writes into game memory
+        for (int k = 0; k < j->nsnaps; k++) if (((wb_snap_t *)j->snaps)[k].owned) free(((wb_snap_t *)j->snaps)[k].data);
+        free(j->snaps);
         run_posts(j->ops, j->n);
         cpend_done(j->fence);
         complete(j->fence);
@@ -1327,13 +1441,13 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                 pc = c; pb = b; pn = ns; ph = h; pd = d;
             }
             if (vkb_shadow_on()) {
-                static uint64_t pin, pib, pob, pdf, psc, pwp, pwk;
+                static uint64_t pin, pib, pob, pdf, psc, pwp, pwk, pwb;
                 VLOG("per frame: pool copies %.1f MiB of device memory; in %.0f copies %.2f MiB, back %.2f MiB, "
-                     "left in game memory in a pass %.0f, write watch %.2f ms; pages copied back %.0f, left to CPU writes %.1f", (double)vkb_shadow_bytes() / 1048576.0,
+                     "left in game memory in a pass %.0f, write watch %.2f ms; pages copied back %.0f, left to CPU writes %.1f, merged by bytes %.1f", (double)vkb_shadow_bytes() / 1048576.0,
                      (double)(g_sh_in - pin) / f, (double)(g_sh_in_bytes - pib) / 1048576.0 / f, (double)(g_sh_out_bytes - pob) / 1048576.0 / f,
                      (double)(g_sh_deferred - pdf) / f, (double)(g_sh_scan_ns - psc) / 1e6 / f,
-                     (double)(g_wb_pages - pwp) / f, (double)(g_wb_kept_pages - pwk) / f);
-                pwp = g_wb_pages; pwk = g_wb_kept_pages;
+                     (double)(g_wb_pages - pwp) / f, (double)(g_wb_kept_pages - pwk) / f, (double)(g_wb_byte_pages - pwb) / f);
+                pwp = g_wb_pages; pwk = g_wb_kept_pages; pwb = g_wb_byte_pages;
                 pin = g_sh_in; pib = g_sh_in_bytes; pob = g_sh_out_bytes; pdf = g_sh_deferred; psc = g_sh_scan_ns;
             }
             VLOG("per frame: GPU %.1f ms (whole submissions), recording waited %.1f ms for a free command slot",
@@ -1585,8 +1699,8 @@ uint64_t mtl_sub_commit(void) {
     if (r != VK_SUCCESS) { vk_check(r, "vkQueueSubmit2"); die("GPU submission failed"); }
     job *j = malloc(sizeof *j);
     if (!j) die("retire job");
-    *j = (job){fence, ops, n, g_cur, g_wb_ranges, g_wb_nranges, NULL};   // g_wb_ranges: in the slot's copy back memory
-    g_wb_ranges = NULL;
+    *j = (job){fence, ops, n, g_cur, g_wb_ranges, g_wb_nranges, NULL, (struct wb_snap_s *)g_wb_snaps, g_wb_nsnaps};   // g_wb_ranges: in the slot's copy back memory
+    g_wb_ranges = NULL; g_wb_snaps = NULL; g_wb_nsnaps = 0;
     totk_tl(TL_COMMIT, fence, 1);
     pthread_mutex_lock(&g_mu);
     *g_jobs_tail = j;

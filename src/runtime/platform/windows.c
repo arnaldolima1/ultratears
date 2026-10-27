@@ -61,7 +61,9 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
     DWORD gran = 4096;
     if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void *)(uintptr_t)addr, (SIZE_T)size, (PVOID *)pages, &n, &gran) != 0) return -1;
     *page = gran;
-    if (n >= (ULONG_PTR)max) ResetWriteWatch((void *)(uintptr_t)addr, (SIZE_T)size);  // (more than fit: caller takes all)
+    // Only the pages returned are reset. With max of them there may be more: the caller asks again from after the last
+    // one. (Resetting the whole range here lost every written page past the first max: a mesh streamed in several MB at
+    // once kept its old contents in the GPU's copy - the "giant planes", L13 in dev-local/docs/issues.md.)
     return (int)n;
 }
 
