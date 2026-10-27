@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <direct.h>
+#include <windows.h>
 
 #include "compat/gfx_compat.h"
 #include "host/hle.h"
@@ -1450,6 +1451,257 @@ void vkb_tex_lumlog(const tex_t *t, uint64_t present) {
         }
     }
     prev_low = lowm;
+}
+
+// [experiment] TOTK_FIN_WRITEBACK=1: a GPU-written texture the game finalizes is written back to its game memory in the
+// texture's own layout (hle_nvn.c nvnTextureFinalize, after draining the queue). On the Switch the GPU draws into game
+// memory, and TOTK moves its baked terrain tiles in memory with the CPU when it compacts the tile cache; here the bytes
+// moved were zeros (L19: dark tiles without grass, the Depths' ground black). 1: written back.
+int mtl_tex_gpu_written(const tex_t *t) {
+    if (!t || !t->serial || !vkb_ready()) return 0;
+    vkb_lock(&g_mu, LK_IMAGES);
+    tslot *s = g_cap ? slot(t->serial) : NULL;
+    int w = s && s->serial == t->serial && s->e && s->e->im.gpu_written;
+    pthread_mutex_unlock(&g_mu);
+    return w;
+}
+typedef struct { const vkb_image *im; uint8_t *px; uint32_t level, layer, pitch; } wb_part;
+static int wb_ok(const vkb_image *im) {   // contents laid out as NVN does (what the upload copies byte for byte)
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
+    return im->gpu_written && !im->astc && bpb && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->depth <= 1 && im->storage &&
+           !(im->d.format >= 0x19 && im->d.format <= 0x24);
+}
+// Records the copies of every level and layer of im to upload memory (after wb_ok); *np parts added to pt.
+static uint64_t wb_record(VkCommandBuffer cb, const vkb_image *im, wb_part *pt, int *np) {
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
+    uint64_t bytes = 0;
+    vkb_image_use(cb, (vkb_image *)im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    for (uint32_t level = 0; level < im->levels; level++) {
+        uint32_t lw = im->width >> level ? im->width >> level : 1, lh = im->height >> level ? im->height >> level : 1;
+        uint32_t bx = (lw + bw - 1) / bw, by = (lh + bh - 1) / bh, pitch = bx * (uint32_t)bpb;
+        for (uint32_t layer = 0; layer < im->layers; layer++) {
+            VkBuffer b;
+            VkDeviceSize off;
+            uint8_t *px = vkb_ring_alloc((VkDeviceSize)pitch * by, 16, &b, &off);
+            VkBufferImageCopy r = {.bufferOffset = off, .bufferRowLength = bx * (uint32_t)bw, .bufferImageHeight = by * (uint32_t)bh,
+                                   .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1}, .imageExtent = {lw, lh, 1}};
+            vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b, 1, &r);
+            pt[(*np)++] = (wb_part){im, px, level, layer, pitch};
+            bytes += (uint64_t)pitch * by;
+        }
+    }
+    return bytes;
+}
+int mtl_tex_writeback(const tex_t *t) {
+    if (!t || !t->serial || !t->mem || !vkb_ready()) return 0;
+    vkb_lock(&g_mu, LK_IMAGES);
+    tslot *s = g_cap ? slot(t->serial) : NULL;
+    vkb_image *im = s && s->serial == t->serial && s->e ? &s->e->im : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!im || !wb_ok(im) || im->storage != t->mem) return 0;
+    wb_part *pt = calloc((size_t)im->levels * im->layers, sizeof *pt);
+    if (!pt) return 0;
+    int np = 0;
+    mtl_sub_begin();
+    wb_record(vkb_cmd(), im, pt, &np);
+    mtl_wait(mtl_sub_commit(), UINT64_MAX);
+    for (int i = 0; i < np; i++) nvn_swizzle(&im->d, pt[i].level, pt[i].layer, pt[i].px, pt[i].pitch, (void *)t->mem);
+    free(pt);
+    static int said;
+    if (said++ < 16) VLOG("[experiment] texture %llu (format %#x %ux%u levels %u) written back to game memory %p at finalize",
+                          (unsigned long long)t->serial, im->d.format, im->width, im->height, im->levels, (const void *)t->mem);
+    return 1;
+}
+// [experiment] TOTK_GPU_WB=1: once a frame (translation thread, after the present), the images the GPU wrote since the
+// last time whose game memory the CPU can access (committed, writable) are written back to it. Logged every 300 frames:
+// how many and how much, to tell whether this can stay on.
+void vkb_tex_gpu_writeback_frame(void) {
+    static int on = -1;
+    static uint64_t done, frames, n_tot, bytes_tot, ns_tot;
+    if (on < 0) on = getenv("TOTK_GPU_WB") != NULL;
+    if (!on || !vkb_ready()) return;
+    uint64_t top = atomic_load(&g_write_seq), t0 = runtime_now_ns();
+    enum { MAXP = 8192 };
+    static wb_part pt[MAXP];
+    int np = 0, n = 0;
+    uint64_t bytes = 0;
+    if (top != done) {
+        mtl_sub_begin();
+        VkCommandBuffer cb = vkb_cmd();
+        vkb_lock(&g_mu, LK_IMAGES);
+        for (entry *e = g_all; e; e = e->all_next) {
+            vkb_image *im = &e->im;
+            if (im->write_seq <= done || !wb_ok(im) || np + (int)(im->levels * im->layers) > MAXP) continue;
+            MEMORY_BASIC_INFORMATION mi;
+            nvn_texlayout L;
+            nvn_tex_layout(&im->d, &L);
+            if (!VirtualQuery(im->storage, &mi, sizeof mi) || mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) ||
+                (const uint8_t *)mi.BaseAddress + mi.RegionSize < im->storage + L.size) continue;
+            bytes += wb_record(cb, im, pt, &np);
+            n++;
+        }
+        pthread_mutex_unlock(&g_mu);
+        mtl_wait(mtl_sub_commit(), UINT64_MAX);
+        for (int i = 0; i < np; i++) nvn_swizzle(&pt[i].im->d, pt[i].level, pt[i].layer, pt[i].px, pt[i].pitch, (void *)pt[i].im->storage);
+        done = top;
+    }
+    n_tot += (uint64_t)n; bytes_tot += bytes; ns_tot += runtime_now_ns() - t0;
+    if (++frames % 300 == 0) {
+        VLOG("[experiment] GPU-written images written back to game memory: %.1f/frame, %.2f MiB/frame, %.2f ms/frame (last 300 frames)",
+             n_tot / 300.0, bytes_tot / 300.0 / 1048576.0, ns_tot / 300.0 / 1e6);
+        n_tot = bytes_tot = ns_tot = 0;
+    }
+}
+
+// TOTK_B2B_LOG=1 (development): GPU buffer copies that read or write the memory of GPU-written images. Their contents
+// are only in the images here, not in game memory (as they are on the Switch), so such a copy moves other bytes.
+void vkb_tex_b2b_log(uint64_t src, uint64_t dst, uint64_t n) {
+    static int on = -1, said;
+    if (on < 0) on = getenv("TOTK_B2B_LOG") != NULL;
+    if (!on || said >= 200) return;
+    vkb_lock(&g_mu, LK_IMAGES);
+    for (entry *e = g_all; e && said < 200; e = e->all_next) {
+        if (!e->im.gpu_written || !e->im.storage) continue;
+        nvn_texlayout L;
+        nvn_tex_layout(&e->im.d, &L);
+        uint64_t lo = (uint64_t)(uintptr_t)e->im.storage, hi = lo + L.size;
+        int rd = src < hi && lo < src + n, wr = dst < hi && lo < dst + n;
+        if (!rd && !wr) continue;
+        said++;
+        VLOG("[b2b] copy %#llx -> %#llx +%#llx %s GPU-written image %llu (%s, format %#x %ux%u levels %u at %#llx+%#llx), present %llu",
+             (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n, rd && wr ? "reads and writes" : rd ? "reads" : "writes",
+             (unsigned long long)e->im.serial, e->refs ? "live" : "aside", e->im.d.format, e->im.width, e->im.height, e->im.d.levels,
+             (unsigned long long)lo, (unsigned long long)L.size, (unsigned long long)vkb_frame());
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+// F9 texture check (development): the textures the traced draws sample that the CPU fills (vkb_tex_vcheck_add), compared
+// once the GPU is idle with what an upload would make of game memory now. A difference with no CPU write since the
+// upload means the image missed a change: draws read other contents than the game holds (terrain heights from another
+// tile stretch the ground into huge wedges). Level 0 of 2D (array) textures; ASTC and converted formats are left out.
+static uint64_t *g_vt;
+static int g_nvt, g_capvt;
+static pthread_mutex_t g_vt_mu = PTHREAD_MUTEX_INITIALIZER;
+void vkb_tex_vcheck_add(const vkb_image *im) {
+    if (!im || im->gpu_written || !im->storage) return;
+    pthread_mutex_lock(&g_vt_mu);
+    int dup = 0;
+    for (int k = g_nvt - 1; k >= 0 && k >= g_nvt - 64 && !dup; k--) dup = g_vt[k] == im->serial;
+    if (!dup && g_nvt < 100000) {
+        if (g_nvt == g_capvt && !(g_vt = realloc(g_vt, sizeof *g_vt * (size_t)(g_capvt = g_capvt ? g_capvt * 2 : 1024)))) die("texture check");
+        g_vt[g_nvt++] = im->serial;
+    }
+    pthread_mutex_unlock(&g_vt_mu);
+}
+static int by_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+void vkb_tex_vcheck_run(void) {
+    pthread_mutex_lock(&g_vt_mu);
+    if (g_nvt) qsort(g_vt, (size_t)g_nvt, sizeof *g_vt, by_u64);
+    typedef struct { vkb_image *im; uint8_t *px; uint32_t pitch, by, layers, bpb; } job;
+    enum { MAXJ = 8192 };
+    static job jobs[MAXJ];
+    int n = 0, skipped = 0;
+    VkDeviceSize total = 0;
+    mtl_sub_begin();
+    VkCommandBuffer cb = vkb_cmd();
+    vkb_lock(&g_mu, LK_IMAGES);
+    for (entry *e = g_all; e && n < MAXJ; e = e->all_next) {
+        vkb_image *im = &e->im;
+        if (!e->refs || !g_nvt || !bsearch(&im->serial, g_vt, (size_t)g_nvt, sizeof *g_vt, by_u64)) continue;
+        int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
+        if (im->gpu_written || im->astc || im->not_uploadable || !im->storage || !im->upload_stamp || !bpb || im->depth > 1 ||
+            im->aspect != VK_IMAGE_ASPECT_COLOR_BIT || (im->d.format >= 0x19 && im->d.format <= 0x24)) { skipped++; continue; }
+        uint32_t bx = (im->width + bw - 1) / bw, by = (im->height + bh - 1) / bh, pitch = bx * (uint32_t)bpb, layers = im->layers > 64 ? 64 : im->layers;
+        VkDeviceSize bytes = (VkDeviceSize)pitch * by * layers;
+        if (total + bytes > (1024u << 20)) { skipped++; continue; }
+        total += bytes;
+        VkBuffer b;
+        VkDeviceSize off;
+        uint8_t *px = vkb_ring_alloc(bytes, 16, &b, &off);
+        vkb_image_use(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy r = {.bufferOffset = off, .bufferRowLength = bx * (uint32_t)bw, .bufferImageHeight = by * (uint32_t)bh,
+                               .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layers}, .imageExtent = {im->width, im->height, 1}};
+        vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b, 1, &r);
+        jobs[n++] = (job){im, px, pitch, by, layers, (uint32_t)bpb};
+    }
+    pthread_mutex_unlock(&g_mu);
+    mtl_wait(mtl_sub_commit(), UINT64_MAX);
+    int bad = 0, cpu = 0, said = 0;
+    for (int i = 0; i < n; i++) {
+        vkb_image *im = jobs[i].im;
+        nvn_texlayout L;
+        nvn_tex_layout(&im->d, &L);
+        const uint8_t *src = im->storage;
+        uint8_t *gathered = NULL;
+        int vp = totk_vpool_gather((uintptr_t)im->storage, 0, NULL);
+        if (vp && (gathered = malloc(L.size ? L.size : 1))) { totk_vpool_gather((uintptr_t)im->storage, L.size, gathered); src = gathered; }
+        size_t slice = (size_t)jobs[i].pitch * jobs[i].by;
+        uint8_t *lin = malloc(slice ? slice : 1);
+        uint64_t diff = 0, first = 0;
+        for (uint32_t layer = 0; lin && layer < jobs[i].layers; layer++) {
+            if (nvn_deswizzle(&im->d, 0, layer, src, lin, jobs[i].pitch)) break;
+            const uint8_t *g = jobs[i].px + slice * layer;
+            for (size_t b = 0; b < slice; b++) if (g[b] != lin[b]) { if (!diff++) first = slice * layer + b; }
+        }
+        free(lin);
+        free(gathered);
+        if (!diff) continue;
+        int tracked = vp || nvn_dirty_tracked(im->storage, L.size);
+        int wrote = vp ? totk_vpool_dirty_since((uintptr_t)im->storage, L.size, im->upload_stamp) : tracked && nvn_dirty_since(im->storage, L.size, im->upload_stamp);
+        if (wrote > 0) { cpu++; continue; }
+        bad++;
+        if (said++ < 200)
+            VLOG("[vcheck] texture %llu format %#x %ux%u layers %u at %p: the image differs from game memory in %llu of %llu bytes (first at +%llu), "
+                 "no CPU write seen since its upload (%s%s, mapping generation %llu now %llu)", (unsigned long long)im->serial, im->d.format,
+                 im->width, im->height, im->layers, (const void *)im->storage, (unsigned long long)diff, (unsigned long long)(slice * jobs[i].layers),
+                 (unsigned long long)first, vp ? "virtual pool" : tracked ? "write-watched" : "NOT write-watched", wrote < 0 ? ", pages unknown" : "",
+                 (unsigned long long)im->vpool_gen, (unsigned long long)totk_vpool_generation());
+    }
+    VLOG("[vcheck] %d textures of the traced draws compared (%d left out): %d differ with no CPU write seen, %d differ where the CPU wrote since",
+         n, skipped, bad, cpu);
+    // Textures read from game memory that GPU-written images overlap: the GPU may have drawn their contents through
+    // another texture object over the same memory, kept as a separate image (terrain tiles dark and without grass,
+    // the Depths' ground black, 2026-10-27). Both shapes, and whether the game memory holds anything at all.
+    int said2 = 0, zero = 0;
+    vkb_lock(&g_mu, LK_IMAGES);
+    for (int i = 0; i < n && said2 < 80; i++) {
+        vkb_image *im = jobs[i].im;
+        nvn_texlayout L;
+        nvn_tex_layout(&im->d, &L);
+        const uint8_t *m = im->storage;
+        int vp = totk_vpool_gather((uintptr_t)m, 0, NULL), empty = !vp;
+        for (uint64_t b = 0; empty && b < L.size; b += 8) { uint64_t v; memcpy(&v, m + b, 8); empty = !v; }
+        zero += empty;
+        int first = 1;
+        for (entry *e = g_all; e && said2 < 80; e = e->all_next) {
+            if (&e->im == im || !e->im.gpu_written || !e->im.storage) continue;
+            nvn_texlayout L2;
+            nvn_tex_layout(&e->im.d, &L2);
+            if (!(e->im.storage < m + L.size && m < e->im.storage + L2.size)) continue;
+            const nvn_texdesc *a = &im->d, *b = &e->im.d;
+            if (first) {
+                said2++;
+                VLOG("[vcheck] texture %llu read from game memory (%s): target %u format %#x %ux%ux%u levels %u flags %#x stride %u block_h %u at %p+%#llx",
+                     (unsigned long long)im->serial, empty ? "all zero" : "not zero", a->target, a->format, a->width, a->height, a->depth, a->levels,
+                     a->flags, a->stride, a->pkg_block_h, (const void *)m, (unsigned long long)L.size);
+                first = 0;
+            }
+            said2++;
+            VLOG("[vcheck]   GPU-written image %llu over it (%s): target %u format %#x %ux%ux%u levels %u flags %#x stride %u block_h %u at %p+%#llx",
+                 (unsigned long long)e->im.serial, e->refs ? "live" : "aside", b->target, b->format, b->width, b->height, b->depth, b->levels,
+                 b->flags, b->stride, b->pkg_block_h, (const void *)e->im.storage, (unsigned long long)L2.size);
+        }
+        if (first && empty && said2 < 80) {   // nothing drew over it here either: who fills it on the Switch?
+            said2++;
+            VLOG("[vcheck] texture %llu read from game memory, all zero, no GPU-written image over it: format %#x %ux%u levels %u flags %#x at %p+%#llx",
+                 (unsigned long long)im->serial, im->d.format, im->width, im->height, im->d.levels, im->d.flags, (const void *)m, (unsigned long long)L.size);
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    VLOG("[vcheck] %d of those textures have all-zero game memory", zero);
+    g_nvt = 0;
+    pthread_mutex_unlock(&g_vt_mu);
 }
 
 void vkb_tex_dump(const char *dir) {

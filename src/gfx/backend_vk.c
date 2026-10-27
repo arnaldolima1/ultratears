@@ -1331,7 +1331,40 @@ static void trace_tex(const char *what, int i, const tex_t *t, const view_t *v) 
                 v ? " | view" : "", v && v->set_layers ? v->min_layer : 0, v && v->set_layers ? v->nlayers : 0,
                 v && v->set_levels ? v->base_level : 0, v && v->set_format ? v->format : 0u, (const void *)t->mem);
 }
+// TOTK_RT_LOG=<NVN format>:<width>x<height> (development): render targets of that format and size, once per texture
+// serial and level, with their memory and shape; and draws into one that conditional rendering skipped (terrain tiles
+// baked into 0xd:260x260 targets, L19).
+static int rt_log_match(const tex_t *t) {
+    static int fmt = -2;
+    static unsigned w, h;
+    if (fmt == -2) { const char *e = getenv("TOTK_RT_LOG"); fmt = e && sscanf(e, "%i:%ux%u", &fmt, &w, &h) == 3 ? fmt : -1; }
+    return fmt >= 0 && t && (int)t->d.format == fmt && t->d.width == w && t->d.height == h;
+}
+static void rt_log(int skipped) {
+    static uint64_t seen[8192];
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    for (int i = 0; i < g_rt.n && i < 8; i++) {
+        const tex_t *t = g_rt.color[i];
+        if (!rt_log_match(t)) continue;
+        unsigned level = g_rt.has_cview[i] && g_rt.cview[i].set_levels ? (unsigned)g_rt.cview[i].base_level : 0;
+        uint64_t k = (t->serial << 5 | level) << 1 | (uint64_t)skipped;
+        pthread_mutex_lock(&mu);
+        int dup = 0;
+        for (unsigned j = (unsigned)(k * 0x9E3779B97F4A7C15ull >> 51), n = 0; n < 8192; j = (j + 1) & 8191, n++) {
+            if (seen[j] == k + 1) { dup = 1; break; }
+            if (!seen[j]) { seen[j] = k + 1; break; }
+        }
+        pthread_mutex_unlock(&mu);
+        if (dup) continue;
+        vkb_image *im = vkb_image_of(t);
+        VLOG("[rtlog] %s texture %llu level %u (image %llu%s) format %#x %ux%u levels %u flags %#x at %p, present %llu",
+             skipped ? "draw skipped (conditional rendering) into" : "target", (unsigned long long)t->serial, level,
+             im ? (unsigned long long)im->serial : 0ull, im && im->gpu_written ? ", GPU-written" : "", t->d.format, t->d.width, t->d.height,
+             t->d.levels, t->d.flags, (const void *)t->mem, (unsigned long long)vkb_frame());
+    }
+}
 static void trace_rt(void) {
+    rt_log(0);
     if (!trace_left()) return;
     VLOG("[trace] SetRenderTargets %d colour + %s", g_rt.n, g_rt.depth ? "depth" : "no depth");
     for (int i = 0; i < g_rt.n && i < 8; i++) trace_tex("colour", i, g_rt.color[i], g_rt.has_cview[i] ? &g_rt.cview[i] : NULL);
@@ -1585,6 +1618,7 @@ static void dump_check(uint64_t n) {
         CreateDirectoryA(dir, NULL);
         vkb_tex_dump(dir);
         vcheck_run();
+        vkb_tex_vcheck_run();
         VLOG("F9: frame %llu dumped to %s (its draws traced above)", (unsigned long long)n, dir);
     }
 }
@@ -1806,6 +1840,7 @@ static int exec_ops(const uint8_t *p, int depth, int mode, int hidx, const mt_ch
         case OP_COPY_B2B: {
             uint64_t s, d, n;
             memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8);
+            vkb_tex_b2b_log(s, d, n);
             mtl_sub_copy(s, d, n);
             break;
         }
@@ -1823,7 +1858,7 @@ static int exec_ops(const uint8_t *p, int depth, int mode, int hidx, const mt_ch
             vkb_state(h.op, a);
             break;
         case OP_DRAW: case OP_DRAW_IDX:
-            if (g_render_off) { vkb_cnt_add(g_cond_skipped, 1); break; }
+            if (g_render_off) { vkb_cnt_add(g_cond_skipped, 1); rt_log(1); break; }
             if (g_ok == 1) vkb_draw(a, h.op == OP_DRAW_IDX);
             break;
         case OP_DISPATCH: if (g_ok == 1) vkb_dispatch(a); break;

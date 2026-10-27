@@ -399,6 +399,11 @@ int nvn_tex_live_at(const void *mem, tex_t *out) {
 // a texture finalized right after a submit stays usable by that submit's replay, without waiting for the queue.
 NVN(nvnTextureFinalize, void, NVNtexture *t) {
     if (totk_life_match(TX(t))) totk_life_log("fin tex=%p ser=%llu mem=%p", (void *)t, (unsigned long long)TX(t)->serial, (void *)TX(t)->mem);
+    {   // [experiment] TOTK_FIN_WRITEBACK=1: GPU-drawn contents into game memory before the game reuses or moves it (L19)
+        static int wb = -1; if (wb < 0) wb = getenv("TOTK_FIN_WRITEBACK") != NULL;
+        int mtl_tex_gpu_written(const tex_t *t); int mtl_tex_writeback(const tex_t *t);
+        if (wb && TX(t)->mem && TX(t)->pool && !(TX(t)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && mtl_tex_gpu_written(TX(t))) { x_drain(XD_READ_TEXELS); mtl_tex_writeback(TX(t)); }
+    }
     if (async_replay()) { void x_texrel(const tex_t *o); x_texrel(TX(t)); TX(t)->magic = 0; return; }
     live_del(TX(t)); mtl_tex_release(TX(t)); TX(t)->magic = 0;
 }
@@ -1524,11 +1529,6 @@ NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNco
 }
 // Rasterizer discard runs vertex work without rasterising; with no transform feedback that is the same as not drawing.
 NVN(nvnCommandBufferSetRasterizerDiscard, void, NVNcommandBuffer *c, uint32_t e) { REC(c, OP_RASTER_DISCARD, p_flag)->value = B(e) != 0; }
-/* TOTK diagnostic: TOTK_BINDPROG_LOG=<frame_lo>-<frame_hi> prints every BindProgram of those frames with the program object, its
-   vertex-stage shader data address and the guest call chain (module+offset), so a program choice can be traced to game code. */
-static uint64_t g_frame;
-int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
-static _Atomic int g_diag_env_once = -1;
 // Primitive restart: TOTK draws terrain as triangle strips split by the all-ones index. Not recorded before (the Metal
 // port restarts always), Vulkan drew the split as a vertex 65535 past the base: the ground torn into huge wedges (L18).
 // Vulkan restarts only at the all-ones index of the index type; other indices are reported.
@@ -1536,6 +1536,11 @@ NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t e, 
     if (B(e) && index != -1 && index != 0xffff && index != 0xff) { static int once; if (!once++) LOG("[warning] SetPrimitiveRestart index %#x: Vulkan restarts only at the all-ones index", index); }
     REC(c, OP_PRIM_RESTART, p_flag)->value = B(e) != 0;
 }
+/* TOTK diagnostic: TOTK_BINDPROG_LOG=<frame_lo>-<frame_hi> prints every BindProgram of those frames with the program object, its
+   vertex-stage shader data address and the guest call chain (module+offset), so a program choice can be traced to game code. */
+static uint64_t g_frame;
+int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
+static _Atomic int g_diag_env_once = -1;
 static const char *bindprog_env(void) { return getenv("TOTK_BINDPROG_LOG"); }
 static int diag_env_once_on(void) {
     int v = atomic_load_explicit(&g_diag_env_once, memory_order_relaxed);
@@ -1928,6 +1933,7 @@ static void *x_thread(void *unused) {
             static uint64_t rt; uint64_t per = (uint64_t)(j.period * 1e9);
             if (per && rt != per) { rt = per; void set_time_constraint_comp_x(uint64_t, uint64_t); set_time_constraint_comp_x(per, per / 2); }
             present_exec(j.win, j.idx, j.period, j.crop, j.frame);
+            void vkb_tex_gpu_writeback_frame(void); vkb_tex_gpu_writeback_frame();   // [experiment] TOTK_GPU_WB (L19)
         }
         pthread_mutex_lock(&g_xq_mu);
         if (j.kind == XJ_SUBMIT) { g_xsub_fence[j.sub % XF] = mtl_last_fence(); g_xsub_done = j.sub; }

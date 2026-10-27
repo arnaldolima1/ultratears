@@ -145,6 +145,9 @@ void vkb_tex_lumlog(const tex_t *t, uint64_t present);   // TOTK_LUMLOG (develop
 void vkb_dump_request(void);                // TOTK_DUMP_KEY=<dir>: F9 dumps a frame and traces its draws (development)
 void vkb_draw_trace_arm(uint64_t frame, long long n);   // TOTK_VK_DRAWTRACE from a frame on, armed while running
 void vkb_vcheck_add(uint64_t addr, uint64_t len, uint32_t draw, int kind);   // F9: a traced draw's index 0 / vertex 1 / constant 2 / storage 3 range
+void vkb_tex_vcheck_add(const vkb_image *im);   // F9: a texture a traced draw samples (vkb_tex.c)
+void vkb_tex_vcheck_run(void);              // F9: those textures compared with game memory
+void vkb_tex_b2b_log(uint64_t src, uint64_t dst, uint64_t n);   // TOTK_B2B_LOG: buffer copies over GPU-written images
 void vkb_tex_dump(const char *dir);         // TOTK_DUMP: the GPU-written images as BMP (development)       // the game finalized the texture: image freed after the GPU is done
 
 // ---- vkb_draw.c: render state, texture / sampler pools, draws

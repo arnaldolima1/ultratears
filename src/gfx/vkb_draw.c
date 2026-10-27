@@ -1461,6 +1461,7 @@ static void trace_resources(const vkb_shader *sh, int stage) {
                            im->width, im->height, im->gpu_written ? "/gpu" : "", (const void *)im->storage,
                            (unsigned long long)((uintptr_t)im->img & 0xffff))
                 : snprintf(line + n, sizeof line - n, " t%d=-", sh->tex[i].slot);
+        if (im) vkb_tex_vcheck_add(im);
         int sid = (int)(S.tex[stage][sh->tex[i].slot] >> 20) & 0xFFF;
         vkb_rw_read(&g_reg_mu, LK_TEXREG);
         if (sid < g_nsreg && g_sreg[sid].valid) {
