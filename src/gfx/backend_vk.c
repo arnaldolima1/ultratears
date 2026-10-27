@@ -120,19 +120,16 @@ static void backend_init(void) {
     pthread_mutex_unlock(&mu);
 }
 
-void mtl_pool_add(const void *mem, uint64_t size) {
-    backend_init();
-    if (!g_ok || !mem || !size) return;
-    uintptr_t align = vkc.host_pointer_alignment ? vkc.host_pointer_alignment : 4096;
-    uintptr_t lo = (uintptr_t)mem, hi = lo + size, a = lo & ~(align - 1), b = (hi + align - 1) & ~(align - 1);
-    // The import needs committed memory: guest pages are committed on first touch, so the pool is committed now.
+// Host memory [a, b) (aligned) imported as a buffer the GPU reads and writes in place. 0: not importable.
+static int import_host(uintptr_t a, uintptr_t b, VkBuffer *out_buf, VkDeviceMemory *out_mem) {
+    // The import needs committed memory: guest pages are committed on first touch, so the range is committed now.
     // A virtual pool is an inaccessible address range (totk_vpool_win.c): no memory to import (sparse binding, later).
     MEMORY_BASIC_INFORMATION mi;
     if (a >= GUEST_LO && b <= GUEST_HI) plat_commit(a, b - a);
-    else if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || mi.Protect == PAGE_NOACCESS) return;
+    else if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || mi.Protect == PAGE_NOACCESS) return 0;
     VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (!vk_check(vk.vkGetMemoryHostPointerPropertiesEXT(vkc.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-                                                          (void *)a, &hp), "host pointer properties")) return;
+                                                          (void *)a, &hp), "host pointer properties")) return 0;
     VkExternalMemoryBufferCreateInfo eb = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &eb, .size = b - a,
@@ -141,7 +138,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VkBuffer buf;
-    if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &buf), "pool buffer")) return;
+    if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &buf), "pool buffer")) return 0;
     VkMemoryRequirements req;
     vk.vkGetBufferMemoryRequirements(vkc.device, buf, &req);
     uint32_t type = memory_type(req.memoryTypeBits & hp.memoryTypeBits);
@@ -151,11 +148,23 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fl, .allocationSize = b - a, .memoryTypeIndex = type};
     VkDeviceMemory dm;
     if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &dm), "pool import")) {
-        VLOG("memory pool %p+%#llx: cannot import (memory types %#x / %#x)", mem, (unsigned long long)size, req.memoryTypeBits, hp.memoryTypeBits);
+        VLOG("memory %#llx..%#llx: cannot import (memory types %#x / %#x)", (unsigned long long)a, (unsigned long long)b, req.memoryTypeBits, hp.memoryTypeBits);
         vk.vkDestroyBuffer(vkc.device, buf, NULL);
-        return;
+        return 0;
     }
     vk.vkBindBufferMemory(vkc.device, buf, dm, 0);
+    *out_buf = buf; *out_mem = dm;
+    return 1;
+}
+
+void mtl_pool_add(const void *mem, uint64_t size) {
+    backend_init();
+    if (!g_ok || !mem || !size) return;
+    uintptr_t align = vkc.host_pointer_alignment ? vkc.host_pointer_alignment : 4096;
+    uintptr_t lo = (uintptr_t)mem, hi = lo + size, a = lo & ~(align - 1), b = (hi + align - 1) & ~(align - 1);
+    VkBuffer buf;
+    VkDeviceMemory dm;
+    if (!import_host(a, b, &buf, &dm)) return;
     vkb_rw_write(&g_pool_mu, LK_POOLS);
     if (g_npools == g_capools) {
         g_capools = g_capools ? g_capools * 2 : 64;
@@ -659,6 +668,69 @@ int vkb_pool_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off)
 }
 static pool_ent *pool_find_mut(uintptr_t addr, uint64_t len) { return (pool_ent *)pool_find(addr, len); }
 
+uint64_t vkb_pool_room(uint64_t addr) {   // bytes from addr to the end of the imported pool holding it (0: none)
+    if (g_ok != 1) return 0;
+    vkb_rw_read(&g_pool_mu, LK_POOLS);
+    const pool_ent *p = pool_find((uintptr_t)addr, 1);
+    uint64_t n = p ? p->hi - addr : 0;
+    vkb_rw_read_end(&g_pool_mu);
+    return n;
+}
+// A range that runs past the end of its pool, across other pools and the memory between them: on the Switch the GPU
+// sees game memory as one, here each pool is a buffer of its own. TOTK's Depths terrain vertices, pulled by the vertex
+// shaders from a storage buffer, lie in such a range (~258 MiB from inside one pool on; bound empty before, the ground
+// lost its material pass; bound up to the pool's end, the vertices past it exploded into shards, L20). Such a range is
+// imported as one buffer of its own, kept for later draws (the least recently used of SPANS goes).
+typedef struct { uint64_t lo, hi, used; VkBuffer buf; VkDeviceMemory mem; } span_t;
+enum { SPANS = 32 };
+static span_t g_spans[SPANS];
+static int g_nspans;
+static pthread_mutex_t g_span_mu = PTHREAD_MUTEX_INITIALIZER;
+int vkb_span_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
+    // [experiment, off] TOTK_VK_SPAN=1: with these ranges bound the Depths' terrain shot out as shards: the addresses
+    // the game computes there are not those of the data in our memory layout (pools contiguous in the Switch GPU's
+    // address space?), so they are not imported by default (L20)
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_VK_SPAN"); on = e && *e == '1'; }
+    if (!on || g_ok != 1 || !addr || !len || len > (1ull << 30)) return 0;
+    uint64_t now = vkb_frame();
+    pthread_mutex_lock(&g_span_mu);
+    for (int i = 0; i < g_nspans; i++)
+        if (addr >= g_spans[i].lo && addr + len <= g_spans[i].hi) {
+            g_spans[i].used = now;
+            *buf = g_spans[i].buf; *off = addr - g_spans[i].lo;
+            pthread_mutex_unlock(&g_span_mu);
+            return 1;
+        }
+    uintptr_t align = vkc.host_pointer_alignment ? vkc.host_pointer_alignment : 4096;
+    uintptr_t a = (uintptr_t)addr & ~(align - 1), b = ((uintptr_t)(addr + len) + align - 1) & ~(align - 1);
+    span_t s = {a, b, now};
+    if (!import_host(a, b, &s.buf, &s.mem)) { pthread_mutex_unlock(&g_span_mu); return 0; }
+    int k = g_nspans < SPANS ? g_nspans++ : 0;
+    if (k == 0 && g_nspans == SPANS)
+        for (int i = 1; i < SPANS; i++) if (g_spans[i].used < g_spans[k].used) k = i;
+    if (k < g_nspans && g_spans[k].buf) destroy_later(VK_NULL_HANDLE, VK_NULL_HANDLE, g_spans[k].mem, g_spans[k].buf);
+    g_spans[k] = s;
+    static int said;
+    if (said++ < 16) {   // what is there: pages all zero, inside / past the starting pool, virtual pools
+        int totk_vpool_gather(uintptr_t va, uint64_t len, void *dst);
+        uint64_t room = vkb_pool_room(addr), zin = 0, zout = 0, nin = 0, nout = 0;
+        for (uint64_t p = a; p < b; p += 4096) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)p;
+            int z = 1;
+            for (int w = 0; w < 512 && z; w++) z = !q[w];
+            if (p < addr + room) { nin++; zin += (uint64_t)z; } else { nout++; zout += (uint64_t)z; }
+        }
+        VLOG("memory %#llx..%#llx (%llu MiB, %llu MiB past the end of its pool) imported for a range the GPU reads: zero pages %llu of %llu "
+             "in the pool, %llu of %llu past it; virtual pool at start %d, at end %d", (unsigned long long)a, (unsigned long long)b,
+             (unsigned long long)((b - a) >> 20), (unsigned long long)((len - room) >> 20), (unsigned long long)zin, (unsigned long long)nin,
+             (unsigned long long)zout, (unsigned long long)nout, totk_vpool_gather((uintptr_t)addr, 0, NULL),
+             totk_vpool_gather((uintptr_t)(addr + len - 1), 0, NULL));
+    }
+    *buf = s.buf; *off = addr - a;
+    pthread_mutex_unlock(&g_span_mu);
+    return 1;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     if (g_ok != 1) { *buf = NULL; *off = 0; return 0; }
     vkb_rw_read(&g_pool_mu, LK_POOLS);

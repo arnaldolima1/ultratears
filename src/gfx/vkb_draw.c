@@ -596,6 +596,11 @@ static VkDescriptorBufferInfo guest_range(uint64_t addr, uint64_t size, VkDevice
             return (VkDescriptorBufferInfo){rb, ro, size};
         }
     }
+    // a storage range past the end of its pool (backend_vk.c vkb_span_addr): the whole of it, imported on its own
+    if (!copy_ok && addr && size && vkb_pool_room(addr) && vkb_span_addr(addr, size, &buf, &off) && !(off % align)) {
+        VkDeviceSize max = vkc.props.limits.maxStorageBufferRange;
+        return (VkDescriptorBufferInfo){buf, off, max && size > max ? max : size};
+    }
     return (VkDescriptorBufferInfo){g_zero, 0, 65536};
 }
 
@@ -1222,6 +1227,21 @@ static VkFormat float_read(VkFormat f) {
     }
 }
 
+// The vertices an indexed draw with a base vertex reads: base + the largest index (restart indices left out). 0: not
+// known (the index buffer is not in game memory).
+static uint64_t draw_vertex_end(const p_draw_idx *di) {
+    uint32_t isz = di->itype == 0 ? 1u : di->itype == 1 ? 2u : 4u, restart = isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu, top = 0;
+    void *hb;
+    uint64_t hoff;
+    if (!di->ibuf || di->count <= 0 || !mtl_addr(di->ibuf, (uint64_t)di->count * isz, &hb, &hoff)) return 0;
+    const uint8_t *ib = (const uint8_t *)(uintptr_t)di->ibuf;
+    for (int i = 0; i < di->count; i++) {
+        uint32_t v = isz == 1 ? ib[i] : isz == 2 ? ((const uint16_t *)ib)[i] : ((const uint32_t *)ib)[i];
+        if (v != restart && v > top) top = v;
+    }
+    return (uint64_t)di->base_vertex + top + 1;
+}
+static __thread uint64_t t_vertex_end;   // vkb_draw -> set_vertex_input: the vertices this draw reads (0: the game's ranges)
 static void set_vertex_input(VkCommandBuffer cb, uint32_t int_inputs) {
     VkVertexInputBindingDescription2EXT bind[16];
     VkVertexInputAttributeDescription2EXT attr[16];
@@ -1256,6 +1276,18 @@ static void set_vertex_input(VkCommandBuffer cb, uint32_t int_inputs) {
         VkBuffer buf;
         VkDeviceSize off;
         VkDeviceSize size = S.vbuf[s].size;
+        // A base vertex past the end of the game's range: the Switch's GPU reads on through game memory. TOTK's Depths
+        // terrain draws index ~75 MiB past a 2 MiB vertex buffer, into the next pool; the vertices read as zeros and the
+        // triangles shot out as shards (L20). The range the draw reads, imported across pools when it must be.
+        uint64_t need = t_vertex_end && !S.vstream[s].divisor ? t_vertex_end * S.vstream[s].stride : 0;
+        if (S.vbuf[s].address && need > size) {
+            if (vkb_gpu_addr(S.vbuf[s].address, need, &buf, &off)) size = need;
+            else if (vkb_pool_room(S.vbuf[s].address) && vkb_span_addr(S.vbuf[s].address, need, &buf, &off)) {
+                VkDeviceSize key[3] = {(VkDeviceSize)(uintptr_t)buf, off, need};
+                if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &buf, &off, &need, NULL);
+                continue;
+            }
+        }
         if (S.vbuf[s].address && size && vkb_gpu_addr(S.vbuf[s].address, size, &buf, &off)) {
             VkDeviceSize key[3] = {(VkDeviceSize)(uintptr_t)buf, off, size};
             if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &buf, &off, &size, NULL);
@@ -1773,6 +1805,11 @@ void vkb_draw(const uint8_t *a, int indexed) {
         vkb_cnt_add(g_local_barriers, 1);
     }
     wrote_pass = vkb_pass_serial();
+    t_vertex_end = 0;
+    if (indexed && di->base_vertex > 0)   // the indices are read only when the base vertex alone is past a stream's range
+        for (uint32_t s = 0; s < 16; s++)
+            if (S.vbuf[s].address && S.vstream[s].stride && !S.vstream[s].divisor &&
+                ((uint64_t)di->base_vertex + 1) * S.vstream[s].stride > S.vbuf[s].size) { t_vertex_end = draw_vertex_end(di); break; }
     set_vertex_input(cb, int_inputs);
     uint32_t inst = indexed ? (uint32_t)(di->instances ? di->instances : 1) : (uint32_t)(dr->instances ? dr->instances : 1);
     vkb_checkpoint(indexed ? "draw indexed" : "draw", vs->key, fs ? fs->key : NULL);
