@@ -24,7 +24,9 @@
 #include "vkb_lock.h"
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
-enum { UBO_MAX = 65536, OTHER_MAX = 1 << 20, MERGE_MAX = 4 << 20 };
+// SSBO_MAX: TOTK binds one 1.4 MB storage buffer (per-object transforms / skinning) to most draws of a frame; read live,
+// animated meshes and props tore into wedges (2026-10-28, F9 geom8/f6333).
+enum { UBO_MAX = 65536, OTHER_MAX = 1 << 20, SSBO_MAX = 4 << 20, MERGE_MAX = 4 << 20 };
 
 typedef struct { uint64_t lo, hi; } rng;
 typedef struct { int n; rng *r; size_t *off; uint8_t *bytes; uint64_t done; } ucap;   // ranges sorted, disjoint; off: into bytes; done: the GPU had completed this submission at the capture
@@ -53,7 +55,7 @@ static void collect(rng **v, int *n, int *cap, const uint8_t *p, int depth) {
                 const p_bind_buf *b = (const p_bind_buf *)(p + 8);
                 addr = b->addr; sz = b->size;
                 if (h.op == OP_BIND_UBO && sz > UBO_MAX) sz = UBO_MAX;
-                if (h.op == OP_BIND_SSBO && sz > OTHER_MAX) sz = 0;
+                if (h.op == OP_BIND_SSBO && sz > SSBO_MAX) sz = 0;
             }
             if (addr && sz) {
                 if (*n == *cap) { *cap = *cap ? *cap * 2 : 4096; if (!(*v = realloc(*v, sizeof **v * (size_t)*cap))) die("uniform capture ranges"); }
