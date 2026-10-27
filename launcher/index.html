@@ -315,7 +315,7 @@
     <section class="view" id="view-about">
       <div class="panel wide about">
         <h2>Sobre</h2>
-        <p class="lead"><b>UltraTears</b> é um port nativo não oficial de <i>The Legend of Zelda: Tears of the Kingdom</i> 1.4.3 para PC. Não é um emulador: o código do jogo é traduzido antes (recompilação estática ARM64 → C → x86-64) e o sistema do Switch e a API gráfica NVN são substituídos por implementações próprias em Windows e Vulkan.</p>
+        <p class="lead"><b>UltraTears</b> é um port nativo não oficial de <i>The Legend of Zelda: Tears of the Kingdom</i> 1.4.3 para PC. Não é um emulador: o código do jogo é traduzido antes (recompilação estática ARM64 → C, compilado para o processador do PC) e o sistema do Switch e a API gráfica NVN são substituídos por implementações próprias sobre Vulkan, no Windows e no macOS.</p>
         <div class="panel-scroll">
 
         <div class="hero-credit">
@@ -335,11 +335,22 @@
           <div><b>LASRecomp e B2recomp</b><span>Partes do runtime de recompilação (MIT / GPL-3.0)</span></div>
           <div><b>Rich Geldreich</b><span>bc7enc e rgbcx, codificação de texturas BC7 / BC1 (MIT)</span></div>
           <div><b>SavageWind</b><span>Técnicas de BotW usadas como referência no controle de quadros e na renderização</span></div>
+          <div><b>RxEmam</b><span>Câmera com mouse e teclado remapeável (PR #20)</span></div>
+          <div><b>PashaKagan</b><span>Tabelas de salto do lifter e pacote único de shaders (PRs #24 e #25)</span></div>
+          <div><b>Khronos · MoltenVK</b><span>Vulkan sobre Metal no macOS e a camada de shader objects</span></div>
+          <div><b>LibHac</b><span>Leitura de NSP/XCI na extensão de extração (BSD-3)</span></div>
           <div><b>SDL3 · LLVM/Clang · Tauri</b><span>Janela, controles e áudio · compilador · este launcher</span></div>
         </div>
 
         <h3 class="mt">Este fork</h3>
-        <p class="fork">Launcher, contador de FPS, correção de iluminação para GPUs AMD e ajustes de janela por <b>arnaldolima1</b>.</p>
+        <p class="fork">Por <b>arnaldolima1</b>:</p>
+        <ul class="fork-list">
+          <li><b>Port para macOS</b> em Apple silicon (M1 em diante), sobre MoltenVK</li>
+          <li><b>Este launcher</b>: instalação guiada, extensões, configurações e abertura animada</li>
+          <li><b>Extração direta</b> dos seus NSP/XCI com a extensão nxextract</li>
+          <li><b>Build incremental</b>: uma mudança recompila só o que ela afeta</li>
+          <li>Contador de FPS, correção de iluminação para GPUs AMD e ajustes de janela</li>
+        </ul>
 
         <div class="legal">
           <p>Distribuído sob a <b>GNU GPL v3</b> ou posterior; cada componente de terceiros mantém sua licença.</p>
