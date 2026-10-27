@@ -46,3 +46,9 @@ third_party/maxwell_shader/src/*/obj/
 third_party/shader_translator/bin/
 third_party/shader_translator/obj/
 third_party/totk_xlate/
+
+# fork: original artwork for the launcher (optimised copies are in launcher/public)
+assets/*.png
+assets/*.jpg
+assets/*.jpeg
+assets/*.mp3

@@ -1,3 +1,60 @@
+# UltraTears — fork com launcher
+
+> **Todo o crédito do port é de [kuraeow](https://github.com/kuraeow), criador e desenvolvedor principal do UltraTears.**
+> Projeto original: **https://github.com/kuraeow/ultratears**. Este fork só acrescenta um launcher e alguns ajustes por
+> cima do trabalho dele; a recompilação, o runtime, a camada gráfica Vulkan, o áudio e o build são dele.
+
+![Launcher: tela inicial](docs/launcher/home.png)
+
+## O que este fork acrescenta
+
+- **Launcher** (`launcher/`, Tauri): instala o jogo a partir do seu dump com barra de progresso por etapa, guarda as
+  configurações e abre o jogo no lugar da própria janela, com uma tela de transição. A arte que vem com ele é própria
+  (nada da Nintendo); você pode trocar pela sua (veja **Arte personalizada**).
+- **Mods** (aba Mods do launcher), portados do [MacNativeGames](https://github.com/ly05010419/MacNativeGames) (MIT):
+  - **60 FPS** (`TOTK_FPS60=1`): o controlador de quadros pode escolher 60, com o passo de tempo real, para o jogo
+    não acelerar; `F2` liga/desliga durante o jogo.
+  - **Resolução maior** (`TOTK_RENDER_RES=<l>x<a>`): a cena 3D renderizada acima de 1600×900 (1080p a 4K), com a
+    memória gráfica do jogo aumentada por um overlay do `HeapDef` gerado do seu RomFS.
+- **Painel `F1`** no jogo: FPS, pior quadro, CPU, RAM, GPU e o estado dos mods; **contador de FPS** (`F3`).
+- **Correção de iluminação em GPUs AMD**: sem `VK_EXT_attachment_feedback_loop_dynamic_state`, texturas que eram alvo
+  do próprio passo liam vazio; agora a profundidade é lida em `VK_IMAGE_LAYOUT_GENERAL` e a cor de uma cópia feita antes
+  do passo (`TOTK_VK_FB_GENERAL=0`, `TOTK_VK_FB_COPY=0` para comparar).
+- **Sem janela de console**: o executável é ligado como aplicativo de janela; o log vai para `lasrecomp.log`.
+- `settings.cfg`: configurações do jogador (variáveis `TOTK_*`), lidas antes do `ultratears.cfg` e preservadas pelo setup.
+- `setup.py` funciona em PCs sem git instalado.
+
+## Usar o launcher
+
+1. Baixe `UltraTears-Launcher-<versão>-windows-x86_64.zip` em **Releases** e extraia numa pasta própria
+   (~32 GB livres para o build).
+2. Abra **`UltraTears Launcher.exe`**, vá em **Instalação**, escolha a pasta do **seu** dump já extraído (`exefs` e
+   `romfs` da versão 1.4.3) e clique em **Instalar**. O launcher não descriptografa nada: pacotes `.nsp`/`.xci` não são
+   aceitos, como no projeto original.
+3. Em **Mods**, ligue o que quiser; quando terminar a instalação, clique em **Jogar**.
+
+![Launcher: mods](docs/launcher/mods.png)
+
+### Arte personalizada
+
+Crie a pasta `launcher-art` ao lado do `UltraTears Launcher.exe` (ou use o botão **Arte do launcher** em
+Configurações) e coloque nela as imagens e a música que quiser; o que estiver lá substitui a arte neutra:
+
+| Arquivo | Uso |
+|---|---|
+| `bg1.jpg`, `bg2.jpg`, … (ou `.png` / `.webp`) | fundos que se alternam na tela inicial |
+| `logo.png` | logo da tela inicial (fundo transparente) |
+| `loading.jpg` | tela de transição ao abrir o jogo |
+| `music.mp3` (ou `.ogg`) | música de fundo |
+
+Esses arquivos ficam só no seu PC: não os envie para o repositório.
+
+![Launcher: sobre e créditos](docs/launcher/about.png)
+
+---
+
+*O README original do UltraTears segue abaixo, sem alterações.*
+
 # UltraTears
 
 **UltraTears** is an unofficial native PC port of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch,

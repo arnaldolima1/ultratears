@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UltraTears</title>
+  <script type="module" src="/src/main.js"></script>
+</head>
+<body>
+  <!-- background slideshow -->
+  <div id="bg" aria-hidden="true"></div>
+  <div class="shade" aria-hidden="true"></div>
+  <div class="motes" aria-hidden="true"></div>
+
+  <!-- title bar -->
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.2 4.6L12 22 9.8 6.6z" fill="currentColor"/><path d="M7 7.5h10" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span>ULTRATEARS</span>
+      <small id="version" data-tauri-drag-region></small>
+    </div>
+    <nav class="tabs" data-tauri-drag-region>
+      <button class="tab active" data-view="home">Início</button>
+      <button class="tab" data-view="install">Instalação</button>
+      <button class="tab" data-view="mods">Mods</button>
+      <button class="tab" data-view="settings">Configurações</button>
+      <button class="tab" data-view="about">Sobre</button>
+    </nav>
+    <div class="win-buttons">
+      <button id="music" class="icon-btn" title="Música">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor"/><circle cx="17.5" cy="16" r="2.5" fill="currentColor"/><path class="mute-line" d="M3 3l18 18" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+      <button id="min" class="icon-btn" title="Minimizar"><svg viewBox="0 0 24 24"><path d="M5 12h14" stroke="currentColor" stroke-width="1.8"/></svg></button>
+      <button id="max" class="icon-btn" title="Maximizar"><svg viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      <button id="close" class="icon-btn close" title="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8"/></svg></button>
+    </div>
+  </header>
+
+  <main>
+    <!-- HOME -->
+    <section class="view active" id="view-home">
+      <div class="home">
+        <div class="logo" id="logo">
+          <div class="neutral-logo">
+            <div class="orn"><i></i><u></u><i></i></div>
+            <div class="wordmark"><b>ULTRATEARS</b><span>Tears of the Kingdom · PC</span></div>
+          </div>
+        </div>
+        <div class="divider"><span></span><i></i><span></span></div>
+        <p class="tagline">Port nativo para PC · Vulkan</p>
+        <button id="play" class="play" disabled>
+          <span class="play-glow"></span>
+          <span class="play-label">Jogar</span>
+        </button>
+        <p id="home-status" class="home-status">Verificando instalação…</p>
+      </div>
+      <div class="dots" id="dots"></div>
+    </section>
+
+    <!-- INSTALL -->
+    <section class="view" id="view-install">
+      <div class="panel wide">
+        <h2>Instalação</h2>
+        <p class="lead">Traduz e compila o jogo a partir do <b>seu</b> dump (ExeFS + RomFS da versão 1.4.3). Tudo fica neste PC.</p>
+
+        <div class="grid2">
+          <label class="field">
+            <span>Pasta do jogo (UltraTears)</span>
+            <div class="path"><input id="home-path" readonly /><button class="ghost" id="pick-home">Alterar</button></div>
+          </label>
+          <label class="field">
+            <span>Dump (pasta com <code>exefs</code> e <code>romfs</code>)</span>
+            <div class="path"><input id="dump-path" placeholder="game\ dentro da pasta do jogo" readonly /><button class="ghost" id="pick-dump">Escolher</button></div>
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="field slim">
+            <span>Núcleos usados no build: <b id="cpus-val"></b></span>
+            <input type="range" id="cpus" min="1" max="16" />
+          </label>
+          <div class="actions">
+            <button id="build" class="gold">Instalar / Atualizar</button>
+            <button id="cancel" class="ghost" disabled>Cancelar</button>
+          </div>
+        </div>
+
+        <div class="progress-block">
+          <div class="progress-head">
+            <span id="build-phase">Parado</span>
+            <span id="build-pct">0%</span>
+          </div>
+          <div class="bar"><div id="bar-fill"></div></div>
+          <div class="progress-sub"><span id="build-activity">&nbsp;</span><span id="build-eta"></span></div>
+        </div>
+
+        <ol class="steps" id="steps"></ol>
+
+        <details class="log">
+          <summary>Registro detalhado</summary>
+          <pre id="log"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- MODS -->
+    <section class="view" id="view-mods">
+      <div class="panel wide">
+        <h2>Mods</h2>
+        <p class="lead">Melhorias aplicadas pelo port na hora de abrir o jogo. Nenhum arquivo do jogo é modificado.</p>
+
+        <div class="mods">
+          <article class="mod soon" id="mod-fps60">
+            <div class="mod-art"><span class="mod-num">60</span><small>FPS</small></div>
+            <div class="mod-body">
+              <div class="mod-head">
+                <h3>60 FPS</h3>
+                <span class="badge">Experimental</span>
+              </div>
+              <p>Dobra a taxa de quadros do jogo de 30 para 60, com a física, as animações e a passagem do tempo ajustadas para continuar na velocidade certa.</p>
+              <ul class="mod-tags"><li>Desempenho</li><li>Requer CPU forte</li></ul>
+            </div>
+            <label class="toggle mod-toggle" title="Ligar / desligar"><input type="checkbox" id="set-fps60" /><span class="knob"></span></label>
+          </article>
+
+          <article class="mod soon" id="mod-res">
+            <div class="mod-art"><span class="mod-num">HD</span><small>RES</small></div>
+            <div class="mod-body">
+              <div class="mod-head">
+                <h3>Resolução maior</h3>
+                <span class="badge">Experimental</span>
+              </div>
+              <p>Renderiza a cena acima dos 1600×900 do Switch (até 4K), com a memória gráfica do jogo aumentada na medida. Ligado, a resolução é escolhida em <b>Configurações</b>.</p>
+              <ul class="mod-tags"><li>Qualidade</li><li>Requer GPU forte</li></ul>
+            </div>
+            <label class="toggle mod-toggle" title="Ligar / desligar"><input type="checkbox" id="set-resmod" /><span class="knob"></span></label>
+          </article>
+
+          <article class="mod placeholder">
+            <div class="mod-art empty"><i></i></div>
+            <div class="mod-body">
+              <h3>Mais mods em breve</h3>
+              <p>Distância de visão e outras melhorias vão aparecer aqui.</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="view" id="view-settings">
+      <div class="panel wide">
+        <h2>Configurações</h2>
+        <div class="cards">
+          <div class="card">
+            <h3>Exibição</h3>
+            <label class="toggle"><input type="checkbox" id="set-fps" /><span class="knob"></span><div><b>Contador de FPS</b><small>Mostra o FPS no canto do jogo. <kbd>F3</kbd> liga/desliga durante o jogo.</small></div></label>
+            <label class="toggle"><input type="checkbox" id="set-fullscreen" /><span class="knob"></span><div><b>Tela cheia</b><small>Abre o jogo em tela cheia. <kbd>F11</kbd> alterna durante o jogo.</small></div></label>
+            <label class="toggle"><input type="checkbox" id="set-borderless" /><span class="knob"></span><div><b>Janela sem borda</b><small>Tira a barra de título do jogo (minimizar, maximizar, fechar). Desligado: janela normal.</small></div></label>
+            <label class="field res-field" id="res-field">
+              <span>Resolução da cena <small>(mod Resolução maior)</small></span>
+              <select id="set-res">
+                <option value="1920x1080">1080p · Full HD (1920×1080)</option>
+                <option value="2560x1440">1440p · 2K (2560×1440)</option>
+                <option value="3200x1800">1800p (3200×1800)</option>
+                <option value="3840x2160">2160p · 4K (3840×2160) — experimental</option>
+              </select>
+              <small id="res-status"></small>
+            </label>
+          </div>
+          <div class="card">
+            <h3>Controle</h3>
+            <label class="field">
+              <span>Eixos do giroscópio <small>(ex.: <code>-x,y,-z</code>; vazio = padrão)</small></span>
+              <input id="set-gyro" placeholder="padrão" />
+            </label>
+            <h3 class="mt">Launcher</h3>
+            <label class="toggle"><input type="checkbox" id="set-music" /><span class="knob"></span><div><b>Música de fundo</b><small>Toca no launcher; para quando o jogo abre. Use sua própria música e imagens: <code>music.mp3</code>, <code>bg1.jpg</code>…, <code>logo.png</code> e <code>loading.jpg</code> na pasta <code>launcher-art</code> (botão abaixo).</small></div></label>
+            <label class="field">
+              <span>Volume</span>
+              <input type="range" id="set-volume" min="0" max="100" />
+            </label>
+          </div>
+          <div class="card span2">
+            <h3>Avançado</h3>
+            <label class="field">
+              <span>Variáveis extras (<code>TOTK_NOME=valor</code>, uma por linha)</span>
+              <textarea id="set-extra" rows="3" spellcheck="false" placeholder="TOTK_DRS=1"></textarea>
+            </label>
+            <div class="actions left">
+              <button class="ghost" data-open=".">Pasta do jogo</button>
+              <button class="ghost" data-open="userdata">Saves</button>
+              <button class="ghost" data-open="lasrecomp.log">Log do jogo</button>
+              <button class="ghost" data-open="launcher-art">Arte do launcher</button>
+            </div>
+          </div>
+        </div>
+        <p class="saved" id="saved">Salvo</p>
+      </div>
+    </section>
+
+    <!-- ABOUT -->
+    <section class="view" id="view-about">
+      <div class="panel wide about">
+        <h2>Sobre</h2>
+        <p class="lead"><b>UltraTears</b> é um port nativo não oficial de <i>The Legend of Zelda: Tears of the Kingdom</i> 1.4.3 para PC. Não é um emulador: o código do jogo é traduzido antes (recompilação estática ARM64 → C → x86-64) e o sistema do Switch e a API gráfica NVN são substituídos por implementações próprias em Windows e Vulkan.</p>
+
+        <div class="hero-credit">
+          <div class="hero-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.2 4.6L12 22 9.8 6.6z" fill="currentColor"/><path d="M7 7.5h10" stroke="currentColor" stroke-width="1.6"/></svg></div>
+          <div class="hero-text">
+            <small>Criador e desenvolvedor principal</small>
+            <b>kuraeow</b>
+            <span>Todo o port — recompilação, runtime, camada gráfica Vulkan, áudio e o processo de build — é trabalho dele.</span>
+          </div>
+          <button class="gold" data-url="https://github.com/kuraeow/ultratears">Ver projeto</button>
+        </div>
+
+        <h3 class="mt">Construído sobre</h3>
+        <div class="credits">
+          <div><b>MacNativeGames</b><span>Camada NVN, serviço de tradução de shaders e inventário de shaders (MIT)</span></div>
+          <div><b>Ryujinx Team</b><span>Tradutor de shaders Maxwell → SPIR-V, versão 1.3.2 (MIT)</span></div>
+          <div><b>LASRecomp e B2recomp</b><span>Partes do runtime de recompilação (MIT / GPL-3.0)</span></div>
+          <div><b>Rich Geldreich</b><span>bc7enc e rgbcx, codificação de texturas BC7 / BC1 (MIT)</span></div>
+          <div><b>SavageWind</b><span>Técnicas de BotW usadas como referência no controle de quadros e na renderização</span></div>
+          <div><b>SDL3 · LLVM/Clang · Tauri</b><span>Janela, controles e áudio · compilador · este launcher</span></div>
+        </div>
+
+        <h3 class="mt">Este fork</h3>
+        <p class="fork">Launcher, contador de FPS, correção de iluminação para GPUs AMD e ajustes de janela por <b>arnaldolima1</b>.</p>
+
+        <div class="legal">
+          <p>Distribuído sob a <b>GNU GPL v3</b> ou posterior; cada componente de terceiros mantém sua licença.</p>
+          <p>Nada do jogo vem com o port: tudo é gerado no seu PC a partir do seu próprio dump e deve ficar aqui. Não afiliado nem endossado pela Nintendo. <i>The Legend of Zelda</i> e <i>Tears of the Kingdom</i> são marcas da Nintendo.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- transition to the game -->
+  <div id="transition" aria-hidden="true">
+    <div class="t-bg"></div>
+    <div class="t-emblem"><img id="t-img" alt="" hidden /><div class="t-neutral" id="t-neutral"><div class="t-word"><div class="orn"><i></i><u></u><i></i></div><div class="wordmark"><b>ULTRATEARS</b><span>Tears of the Kingdom · PC</span></div><div class="orn"><i></i><u></u><i></i></div></div></div></div>
+    <div class="t-text"><span id="t-msg">Despertando o reino</span><span class="t-dots"><i></i><i></i><i></i></span></div>
+  </div>
+
+  <!-- dialog -->
+  <div id="dialog" class="dialog hidden" role="dialog">
+    <div class="dialog-box">
+      <h3 id="dialog-title"></h3>
+      <pre id="dialog-body"></pre>
+      <div class="actions"><button class="ghost" id="dialog-log">Abrir log</button><button class="gold" id="dialog-ok">OK</button></div>
+    </div>
+  </div>
+
+  <audio id="bgm" loop preload="auto"></audio>
+</body>
+</html>
