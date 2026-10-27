@@ -101,13 +101,14 @@ fn free_space(p: &Path) -> Option<u64> {
 }
 
 /// The source checkout the launcher can fill an empty game folder from (setup.py --output): ULTRATEARS_SRC, or the
-/// one the launcher itself was built in (launcher/src-tauri/target/<profile>/).
+/// one the launcher itself was built in (launcher/src-tauri/target/<profile>/). Only a Git checkout counts: a game folder
+/// holding the launcher has the downloaded source too, and setup.py refuses --output there.
 fn source_checkout() -> Option<PathBuf> {
     let env = std::env::var("ULTRATEARS_SRC").ok().map(PathBuf::from);
     let exe = std::env::current_exe().ok();
     env.into_iter()
         .chain(exe.iter().flat_map(|e| e.ancestors().skip(1).take(8).map(Path::to_path_buf)))
-        .find(|d| d.join("tools/setup.py").is_file() && d.join("src/runtime").is_dir())
+        .find(|d| d.join("tools/setup.py").is_file() && d.join("src/runtime").is_dir() && d.join(".git").exists())
 }
 
 const TEMP_MARK: &str = ".made-by-extension";
