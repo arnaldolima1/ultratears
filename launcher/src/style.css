@@ -500,6 +500,10 @@ select option { background: #111915; color: var(--text); }
 .set-page.disabled-gyro #gyro-block { opacity: 0.4; pointer-events: none; }
 .set-page.keys-camera #mouse-block { display: none; }
 .bindings { margin: 0 0 14px; }
+.keys-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(232, 212, 154, 0.08); }
+.keys-foot .hint { margin: 0; flex: 1 1 320px; line-height: 2; }
+.keys-foot .ghost.small { flex: none; }
 .bindings h4 { margin: 14px 0 6px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold-lo); }
 .bind-row { display: grid; grid-template-columns: minmax(0, 1fr) 128px 128px; gap: 6px; align-items: center; padding: 5px 10px;
   border: 1px solid rgba(232, 212, 154, 0.08); border-radius: 4px; background: rgba(0, 0, 0, 0.18); margin-bottom: 4px; }
