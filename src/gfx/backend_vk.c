@@ -928,6 +928,15 @@ static void sub_long_check(uint64_t fence) {
              (v[4] - g_sub_snap[4]) / 1e6, (v[5] - g_sub_snap[5]) / 1048576.0, (unsigned long long)vkb_draw_count());
 }
 
+int mtl_slot_free(void) {   // a submission can begin without waiting for the GPU (work that can wait checks first)
+    if (g_ok != 1) return 0;
+    if (g_nslots < SLOTS) return 1;
+    pthread_mutex_lock(&g_mu);
+    uint64_t done = g_done;
+    pthread_mutex_unlock(&g_mu);
+    for (int i = 0; i < g_nslots; i++) if (g_slots[i].fence <= done) return 1;
+    return 0;
+}
 void mtl_sub_begin(void) {
     backend_init();
     g_sub_t0 = runtime_now_ns();

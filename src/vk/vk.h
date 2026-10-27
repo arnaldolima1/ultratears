@@ -41,7 +41,7 @@
     X(vkCmdSetLineWidth) X(vkCmdSetDepthClipNegativeOneToOneEXT) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetProvokingVertexModeEXT) X(vkCmdSetDepthClipEnableEXT) X(vkCmdSetDepthBounds) \
     X(vkCreateQueryPool) X(vkResetQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp2) X(vkGetQueryPoolResults) \
-    X(vkCmdSetAttachmentFeedbackLoopEnableEXT) X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV) X(vkCmdWriteBufferMarkerAMD) \
+    X(vkCmdSetAttachmentFeedbackLoopEnableEXT) X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV) X(vkCmdWriteBufferMarkerAMD) X(vkInvalidateMappedMemoryRanges) \
     X(vkGetDescriptorSetLayoutSizeEXT) X(vkGetDescriptorSetLayoutBindingOffsetEXT) X(vkGetDescriptorEXT) \
     X(vkCmdBindDescriptorBuffersEXT) X(vkCmdSetDescriptorBufferOffsetsEXT)
 #define VK_FN_DECLARE(f) PFN_##f f;

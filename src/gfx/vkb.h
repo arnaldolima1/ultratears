@@ -66,6 +66,10 @@ typedef struct vkb_image {
     uint64_t vpool_gen;            // in a virtual pool: the mapping generation of the last upload (0: not in one)
     const uint8_t *storage;        // the texture's storage in game memory (block-linear / linear)
     uint64_t write_seq;            // vkb_image_written: when the GPU last wrote it (0 = never)
+    uint64_t write_frame;          // ...and in which present
+    int cpu_visible;               // its game memory is in a pool the CPU can access: GPU contents are written back to it
+    int wb_pending;                // in the write-back queue (vkb_tex.c vkb_tex_writeback_frame)
+    uint64_t wb_seq;               // write_seq of the contents last written back (or being)
     struct vkb_image *refresh_from;   // newer contents at the same memory in another size: scaled in before use (vkb_tex.c)
 } vkb_image;
 void vkb_image_written(vkb_image *im);   // the GPU writes it (render target, clear, copy, storage)

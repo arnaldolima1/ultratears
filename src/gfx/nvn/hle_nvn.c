@@ -399,11 +399,6 @@ int nvn_tex_live_at(const void *mem, tex_t *out) {
 // a texture finalized right after a submit stays usable by that submit's replay, without waiting for the queue.
 NVN(nvnTextureFinalize, void, NVNtexture *t) {
     if (totk_life_match(TX(t))) totk_life_log("fin tex=%p ser=%llu mem=%p", (void *)t, (unsigned long long)TX(t)->serial, (void *)TX(t)->mem);
-    {   // [experiment] TOTK_FIN_WRITEBACK=1: GPU-drawn contents into game memory before the game reuses or moves it (L19)
-        static int wb = -1; if (wb < 0) wb = getenv("TOTK_FIN_WRITEBACK") != NULL;
-        int mtl_tex_gpu_written(const tex_t *t); int mtl_tex_writeback(const tex_t *t);
-        if (wb && TX(t)->mem && TX(t)->pool && !(TX(t)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && mtl_tex_gpu_written(TX(t))) { x_drain(XD_READ_TEXELS); mtl_tex_writeback(TX(t)); }
-    }
     if (async_replay()) { void x_texrel(const tex_t *o); x_texrel(TX(t)); TX(t)->magic = 0; return; }
     live_del(TX(t)); mtl_tex_release(TX(t)); TX(t)->magic = 0;
 }
@@ -1933,7 +1928,7 @@ static void *x_thread(void *unused) {
             static uint64_t rt; uint64_t per = (uint64_t)(j.period * 1e9);
             if (per && rt != per) { rt = per; void set_time_constraint_comp_x(uint64_t, uint64_t); set_time_constraint_comp_x(per, per / 2); }
             present_exec(j.win, j.idx, j.period, j.crop, j.frame);
-            void vkb_tex_gpu_writeback_frame(void); vkb_tex_gpu_writeback_frame();   // [experiment] TOTK_GPU_WB (L19)
+            void vkb_tex_writeback_frame(void); vkb_tex_writeback_frame();   // GPU-drawn contents into game memory (vkb_tex.c)
         }
         pthread_mutex_lock(&g_xq_mu);
         if (j.kind == XJ_SUBMIT) { g_xsub_fence[j.sub % XF] = mtl_last_fence(); g_xsub_done = j.sub; }

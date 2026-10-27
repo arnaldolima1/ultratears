@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <direct.h>
-#include <windows.h>
 
 #include "compat/gfx_compat.h"
 #include "host/hle.h"
@@ -156,7 +155,30 @@ static int same_shape(const entry *e, const tex_t *t) {
            a->levels == b->levels && a->stride == b->stride && a->pkg_block_h == b->pkg_block_h &&
            e->has_layout == t->has_layout && (!t->has_layout || !memcmp(e->layout, t->layout, sizeof e->layout));
 }
+// ---- GPU-drawn contents into game memory (write-back) ----
+// On the Switch the GPU draws into game memory and the CPU sees the result there: TOTK bakes its terrain tiles on the
+// GPU and later moves the tile cache in memory with the CPU. Here GPU contents live only in the images, so the moved
+// bytes were zeros: dark tiles without grass, the Depths' ground black (L19, 2026-10-27). An image the GPU writes whose
+// game memory the CPU can access is queued (vkb_image_written); once it has not been written for WB_SETTLE presents,
+// its levels and layers are copied to host memory at a present, and laid out into game memory (nvn_swizzle) at a later
+// one, when the GPU is done with the copy (vkb_tex_writeback_frame, translation thread, nothing waits). Render targets
+// drawn every frame never settle and cost nothing. TOTK_GPU_WB=0: off (A/B).
+// WB_FRAME_BYTES: copied per present at most (the layout into game memory of that much takes ~2 ms on the CPU).
+enum { WB_SETTLE = 2, WB_ARENA = 64u << 20, WB_FRAME_BYTES = 4u << 20, WB_MAXJOBS = 512 };
+int mtl_slot_free(void);
+static entry **g_wbq;                 // queued images (wb_pending), g_wbq_mu
+static int g_nwbq, g_capwbq;
+static pthread_mutex_t g_wbq_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { entry *e; uint64_t seq, fence, at, bytes; } wb_job;   // e NULL: dropped meanwhile; at: offset in the arena
+static wb_job g_wbj[WB_MAXJOBS];      // copies in submission order (g_mu held)
+static int g_nwbj;
+static void wbq_remove(entry *e) {    // g_wbq_mu held
+    for (int i = 0; i < g_nwbq; i++) if (g_wbq[i] == e) { g_wbq[i] = g_wbq[--g_nwbq]; break; }
+    e->im.wb_pending = 0;
+}
 static void entry_drop(entry *e) {   // g_mu held: out of the indexes, destroyed when the GPU is done with it
+    if (e->im.wb_pending) { pthread_mutex_lock(&g_wbq_mu); wbq_remove(e); pthread_mutex_unlock(&g_wbq_mu); }
+    for (int i = 0; i < g_nwbj; i++) if (g_wbj[i].e == e) g_wbj[i].e = NULL;
     if (e->shaped) {
         entry **p = &g_shape[shape_of(e->im.storage, &e->im.d)];
         while (*p && *p != e) p = &(*p)->shape_next;
@@ -260,7 +282,17 @@ static int create(vkb_image *im, const tex_t *t) {
 // The fix is to keep the size fixed (no dynamic resolution).
 static _Atomic uint64_t g_write_seq;
 static uint64_t g_refreshes;
-void vkb_image_written(vkb_image *im) { im->gpu_written = 1; im->write_seq = atomic_fetch_add(&g_write_seq, 1) + 1; }
+void vkb_image_written(vkb_image *im) {
+    im->gpu_written = 1;
+    im->write_seq = atomic_fetch_add(&g_write_seq, 1) + 1;
+    im->write_frame = vkb_frame();
+    if (im->cpu_visible && !__atomic_exchange_n(&im->wb_pending, 1, __ATOMIC_SEQ_CST)) {   // into the write-back queue
+        pthread_mutex_lock(&g_wbq_mu);
+        if (g_nwbq == g_capwbq && !(g_wbq = realloc(g_wbq, sizeof *g_wbq * (size_t)(g_capwbq = g_capwbq ? g_capwbq * 2 : 256)))) die("write-back queue");
+        g_wbq[g_nwbq++] = (entry *)im;   // the image is the entry's first member
+        pthread_mutex_unlock(&g_wbq_mu);
+    }
+}
 static void refresh_mark(entry *e) {   // g_mu held: e is starting to be used by a new texture object
     entry *best = NULL;
     for (entry *o = g_all; o; o = o->all_next)
@@ -363,6 +395,7 @@ vkb_image *vkb_image_of(const tex_t *t) {
         if (!ok) { free(e); pthread_mutex_unlock(&g_mu); return NULL; }
         e->has_layout = t->has_layout;
         memcpy(e->layout, t->layout, sizeof e->layout);
+        e->im.cpu_visible = t->mem && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
         if (t->mem) { uint32_t h = shape_of(t->mem, &t->d); e->shape_next = g_shape[h]; g_shape[h] = e; e->shaped = 1; }
         e->all_next = g_all; e->all_pprev = &g_all;
         if (g_all) g_all->all_pprev = &e->all_next;
@@ -1453,103 +1486,147 @@ void vkb_tex_lumlog(const tex_t *t, uint64_t present) {
     prev_low = lowm;
 }
 
-// [experiment] TOTK_FIN_WRITEBACK=1: a GPU-written texture the game finalizes is written back to its game memory in the
-// texture's own layout (hle_nvn.c nvnTextureFinalize, after draining the queue). On the Switch the GPU draws into game
-// memory, and TOTK moves its baked terrain tiles in memory with the CPU when it compacts the tile cache; here the bytes
-// moved were zeros (L19: dark tiles without grass, the Depths' ground black). 1: written back.
-int mtl_tex_gpu_written(const tex_t *t) {
-    if (!t || !t->serial || !vkb_ready()) return 0;
-    vkb_lock(&g_mu, LK_IMAGES);
-    tslot *s = g_cap ? slot(t->serial) : NULL;
-    int w = s && s->serial == t->serial && s->e && s->e->im.gpu_written;
-    pthread_mutex_unlock(&g_mu);
-    return w;
+
+// Write-back (see "GPU-drawn contents into game memory" above). The arena: host memory the copies land in, used as a
+// ring in job order.
+static VkBuffer g_wb_buf;
+static VkDeviceMemory g_wb_mem;
+static uint8_t *g_wb_map;
+static int g_wb_coherent;
+static uint64_t g_wb_head;   // where the next job's copies go
+static int wb_arena(void) {
+    static int state;   // 0 not tried, 1 ready, -1 failed
+    if (state) return state > 0;
+    state = -1;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = WB_ARENA, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_wb_buf) != VK_SUCCESS) return 0;
+    VkMemoryRequirements req;
+    vk.vkGetBufferMemoryRequirements(vkc.device, g_wb_buf, &req);
+    // cached: the CPU reads it back (reading uncached host memory is many times slower)
+    uint32_t type = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (type == UINT32_MAX) type = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+    void *m;
+    if (type == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &g_wb_mem) != VK_SUCCESS) { vk.vkDestroyBuffer(vkc.device, g_wb_buf, NULL); return 0; }
+    vk.vkBindBufferMemory(vkc.device, g_wb_buf, g_wb_mem, 0);
+    if (vk.vkMapMemory(vkc.device, g_wb_mem, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) return 0;
+    g_wb_map = m;
+    g_wb_coherent = (vkc.memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    state = 1;
+    VLOG("write-back of GPU-drawn images: %u MiB of host memory, %s", WB_ARENA >> 20, g_wb_coherent ? "coherent" : "cached, not coherent");
+    return 1;
 }
-typedef struct { const vkb_image *im; uint8_t *px; uint32_t level, layer, pitch; } wb_part;
-static int wb_ok(const vkb_image *im) {   // contents laid out as NVN does (what the upload copies byte for byte)
-    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
-    return im->gpu_written && !im->astc && bpb && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->depth <= 1 && im->storage &&
-           !(im->d.format >= 0x19 && im->d.format <= 0x24);
+static int wb_alloc(uint64_t n, uint64_t *at) {   // g_mu held: n bytes of the arena after the jobs still waiting
+    if (!g_nwbj) g_wb_head = 0;
+    uint64_t tail = g_nwbj ? g_wbj[0].at : 0;
+    if (!g_nwbj || g_wb_head >= tail) {
+        if (WB_ARENA - g_wb_head >= n) { *at = g_wb_head; g_wb_head += n; return 1; }
+        if (g_nwbj && tail > n) { *at = 0; g_wb_head = n; return 1; }   // wrapped
+        return 0;
+    }
+    if (tail - g_wb_head > n) { *at = g_wb_head; g_wb_head += n; return 1; }
+    return 0;
 }
-// Records the copies of every level and layer of im to upload memory (after wb_ok); *np parts added to pt.
-static uint64_t wb_record(VkCommandBuffer cb, const vkb_image *im, wb_part *pt, int *np) {
+// Contents laid out as NVN does (what the upload copies byte for byte), one level and layer after another.
+static uint64_t wb_size(const vkb_image *im) {
     int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
-    uint64_t bytes = 0;
-    vkb_image_use(cb, (vkb_image *)im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    if (!bpb || im->astc || im->aspect != VK_IMAGE_ASPECT_COLOR_BIT || im->depth > 1 || !im->storage || (im->d.format >= 0x19 && im->d.format <= 0x24)) return 0;
+    uint64_t n = 0;
+    for (uint32_t level = 0; level < im->levels; level++) {
+        uint32_t lw = im->width >> level ? im->width >> level : 1, lh = im->height >> level ? im->height >> level : 1;
+        n += ((uint64_t)(lw + bw - 1) / bw * bpb * ((lh + bh - 1) / bh) + 15) / 16 * 16 * im->layers;
+    }
+    return n;
+}
+// Records (record) or lays out into game memory (!record) every level and layer of im at offset at of the arena.
+static void wb_parts(VkCommandBuffer cb, const vkb_image *im, uint64_t at, int record) {
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(im->d.format, &bw, &bh);
     for (uint32_t level = 0; level < im->levels; level++) {
         uint32_t lw = im->width >> level ? im->width >> level : 1, lh = im->height >> level ? im->height >> level : 1;
         uint32_t bx = (lw + bw - 1) / bw, by = (lh + bh - 1) / bh, pitch = bx * (uint32_t)bpb;
-        for (uint32_t layer = 0; layer < im->layers; layer++) {
-            VkBuffer b;
-            VkDeviceSize off;
-            uint8_t *px = vkb_ring_alloc((VkDeviceSize)pitch * by, 16, &b, &off);
-            VkBufferImageCopy r = {.bufferOffset = off, .bufferRowLength = bx * (uint32_t)bw, .bufferImageHeight = by * (uint32_t)bh,
-                                   .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1}, .imageExtent = {lw, lh, 1}};
-            vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b, 1, &r);
-            pt[(*np)++] = (wb_part){im, px, level, layer, pitch};
-            bytes += (uint64_t)pitch * by;
+        uint64_t n = ((uint64_t)pitch * by + 15) / 16 * 16;
+        for (uint32_t layer = 0; layer < im->layers; layer++, at += n) {
+            if (record) {
+                VkBufferImageCopy r = {.bufferOffset = at, .bufferRowLength = bx * (uint32_t)bw, .bufferImageHeight = by * (uint32_t)bh,
+                                       .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1}, .imageExtent = {lw, lh, 1}};
+                vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_wb_buf, 1, &r);
+            } else nvn_swizzle(&im->d, level, layer, g_wb_map + at, pitch, (void *)im->storage);
         }
     }
-    return bytes;
 }
-int mtl_tex_writeback(const tex_t *t) {
-    if (!t || !t->serial || !t->mem || !vkb_ready()) return 0;
-    vkb_lock(&g_mu, LK_IMAGES);
-    tslot *s = g_cap ? slot(t->serial) : NULL;
-    vkb_image *im = s && s->serial == t->serial && s->e ? &s->e->im : NULL;
-    pthread_mutex_unlock(&g_mu);
-    if (!im || !wb_ok(im) || im->storage != t->mem) return 0;
-    wb_part *pt = calloc((size_t)im->levels * im->layers, sizeof *pt);
-    if (!pt) return 0;
-    int np = 0;
-    mtl_sub_begin();
-    wb_record(vkb_cmd(), im, pt, &np);
-    mtl_wait(mtl_sub_commit(), UINT64_MAX);
-    for (int i = 0; i < np; i++) nvn_swizzle(&im->d, pt[i].level, pt[i].layer, pt[i].px, pt[i].pitch, (void *)t->mem);
-    free(pt);
-    static int said;
-    if (said++ < 16) VLOG("[experiment] texture %llu (format %#x %ux%u levels %u) written back to game memory %p at finalize",
-                          (unsigned long long)t->serial, im->d.format, im->width, im->height, im->levels, (const void *)t->mem);
-    return 1;
-}
-// [experiment] TOTK_GPU_WB=1: once a frame (translation thread, after the present), the images the GPU wrote since the
-// last time whose game memory the CPU can access (committed, writable) are written back to it. Logged every 300 frames:
-// how many and how much, to tell whether this can stay on.
-void vkb_tex_gpu_writeback_frame(void) {
+// The pool lets the CPU at it (cpu_visible); a virtual pool's addresses are only reserved (its bytes are in physical
+// pools' pages), so its textures are left out. (VirtualQuery over the write-watched guest window took ~2 ms a call.)
+static int wb_memory_ok(const vkb_image *im) { return im->cpu_visible && !totk_vpool_gather((uintptr_t)im->storage, 0, NULL); }
+void vkb_tex_writeback_frame(void) {
     static int on = -1;
-    static uint64_t done, frames, n_tot, bytes_tot, ns_tot;
-    if (on < 0) on = getenv("TOTK_GPU_WB") != NULL;
-    if (!on || !vkb_ready()) return;
-    uint64_t top = atomic_load(&g_write_seq), t0 = runtime_now_ns();
-    enum { MAXP = 8192 };
-    static wb_part pt[MAXP];
-    int np = 0, n = 0;
-    uint64_t bytes = 0;
-    if (top != done) {
-        mtl_sub_begin();
-        VkCommandBuffer cb = vkb_cmd();
-        vkb_lock(&g_mu, LK_IMAGES);
-        for (entry *e = g_all; e; e = e->all_next) {
-            vkb_image *im = &e->im;
-            if (im->write_seq <= done || !wb_ok(im) || np + (int)(im->levels * im->layers) > MAXP) continue;
-            MEMORY_BASIC_INFORMATION mi;
-            nvn_texlayout L;
-            nvn_tex_layout(&im->d, &L);
-            if (!VirtualQuery(im->storage, &mi, sizeof mi) || mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) ||
-                (const uint8_t *)mi.BaseAddress + mi.RegionSize < im->storage + L.size) continue;
-            bytes += wb_record(cb, im, pt, &np);
-            n++;
+    static uint64_t frames, st_n, st_bytes, st_ns, st_skip, st_queued, st_max, st_lay;
+    if (on < 0) { const char *e = getenv("TOTK_GPU_WB"); on = !e || *e != '0'; }
+    if (!on || !vkb_ready() || !wb_arena()) return;
+    uint64_t t0 = runtime_now_ns(), now = vkb_frame(), done = mtl_done();
+    vkb_lock(&g_mu, LK_IMAGES);
+    // copies the GPU has finished: into game memory, if the texture is still the game's and was not drawn again since
+    int k = 0;
+    for (; k < g_nwbj && g_wbj[k].fence <= done; k++) {
+        wb_job *j = &g_wbj[k];
+        entry *e = j->e;
+        if (!e || !e->refs || e->im.write_seq != j->seq) { st_skip++; continue; }
+        if (!g_wb_coherent) {   // this job's range only (the CPU caches of the whole arena would cost milliseconds)
+            VkDeviceSize atom = vkc.props.limits.nonCoherentAtomSize ? vkc.props.limits.nonCoherentAtomSize : 64;
+            VkDeviceSize lo = j->at / atom * atom, hi = (j->at + j->bytes + atom - 1) / atom * atom;
+            VkMappedMemoryRange mr = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = g_wb_mem, .offset = lo, .size = hi > WB_ARENA ? VK_WHOLE_SIZE : hi - lo};
+            vk.vkInvalidateMappedMemoryRanges(vkc.device, 1, &mr);
         }
-        pthread_mutex_unlock(&g_mu);
-        mtl_wait(mtl_sub_commit(), UINT64_MAX);
-        for (int i = 0; i < np; i++) nvn_swizzle(&pt[i].im->d, pt[i].level, pt[i].layer, pt[i].px, pt[i].pitch, (void *)pt[i].im->storage);
-        done = top;
+        wb_parts(VK_NULL_HANDLE, &e->im, j->at, 0);
+        st_n++; st_bytes += j->bytes;
     }
-    n_tot += (uint64_t)n; bytes_tot += bytes; ns_tot += runtime_now_ns() - t0;
+    if (k) memmove(g_wbj, g_wbj + k, sizeof *g_wbj * (size_t)(g_nwbj -= k));
+    uint64_t t1 = runtime_now_ns();
+    st_lay += t1 - t0;
+    // images that settled: their copies into the arena, in a submission of their own (not waited for: with every
+    // command buffer in flight they wait for a later present)
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    uint64_t fence = mtl_last_fence() + 1, bytes = 0;
+    int first = g_nwbj, can = mtl_slot_free();
+    pthread_mutex_lock(&g_wbq_mu);
+    for (int i = 0; i < g_nwbq;) {
+        entry *e = g_wbq[i];
+        vkb_image *im = &e->im;
+        if (im->write_seq == im->wb_seq) { wbq_remove(e); continue; }   // nothing new
+        if (now - im->write_frame < WB_SETTLE) { i++; continue; }     // still being drawn
+        uint64_t n = wb_size(im), at;
+        if (!e->refs || !n || !wb_memory_ok(im)) { im->wb_seq = im->write_seq; wbq_remove(e); continue; }
+        if (!can || (bytes && bytes + n > WB_FRAME_BYTES) || g_nwbj == WB_MAXJOBS || !wb_alloc(n, &at)) { i++; continue; }   // a later present
+        if (!cb) { mtl_sub_begin(); cb = vkb_cmd(); }
+        vkb_image_use(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        wb_parts(cb, im, at, 1);
+        g_wbj[g_nwbj++] = (wb_job){e, im->write_seq, fence, at, n};
+        im->wb_seq = im->write_seq;
+        bytes += n;
+        wbq_remove(e);
+    }
+    st_queued += (uint64_t)g_nwbq;
+    pthread_mutex_unlock(&g_wbq_mu);
+    pthread_mutex_unlock(&g_mu);
+    if (cb) {
+        VkMemoryBarrier2 mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                               .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+        VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        vk.vkCmdPipelineBarrier2(cb, &dep);
+        uint64_t f = mtl_sub_commit();
+        if (f != fence) {   // (one thread commits: never) the jobs wait for the fence they really have
+            vkb_lock(&g_mu, LK_IMAGES);
+            for (int i = first; i < g_nwbj; i++) if (g_wbj[i].fence == fence) g_wbj[i].fence = f;
+            pthread_mutex_unlock(&g_mu);
+        }
+    }
+    uint64_t dt = runtime_now_ns() - t0;
+    st_ns += dt;
+    if (dt > st_max) st_max = dt;
     if (++frames % 300 == 0) {
-        VLOG("[experiment] GPU-written images written back to game memory: %.1f/frame, %.2f MiB/frame, %.2f ms/frame (last 300 frames)",
-             n_tot / 300.0, bytes_tot / 300.0 / 1048576.0, ns_tot / 300.0 / 1e6);
-        n_tot = bytes_tot = ns_tot = 0;
+        VLOG("per frame: GPU-drawn images written back to game memory %.2f (%.3f MiB), %.2f skipped (texture gone or drawn again), "
+             "%.1f queued; %.3f ms on the translation thread (%.3f laying out, longest frame %.2f ms)", st_n / 300.0, st_bytes / 300.0 / 1048576.0,
+             st_skip / 300.0, st_queued / 300.0, st_ns / 300.0 / 1e6, st_lay / 300.0 / 1e6, st_max / 1e6);
+        st_n = st_bytes = st_ns = st_skip = st_queued = st_max = st_lay = 0;
     }
 }
 
