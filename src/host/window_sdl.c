@@ -5,7 +5,8 @@
 //  - game controllers: buttons by position as on a Switch controller (the right face button is A), sticks with Y up;
 //  - rumble: the game's vibration values (hid_feedback.c) drive the controller's low / high frequency motors.
 //  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen.
-//  - F3: the frame rate over the picture (TOTK_FPS_OVERLAY=1 starts with it on).
+//  - F3: the frame rate over the picture (TOTK_FPS_OVERLAY=1 starts with it on); F1: a panel with frame times, CPU,
+//    memory, GPU and the mods' state; F2: the 60 FPS mod on / off (src/host/frame_step.c).
 // A launcher hands the window over with TOTK_WINDOW=x,y,w,h (pixels), TOTK_BORDERLESS=1, TOTK_FULLSCREEN=1 and
 // TOTK_START_HIDDEN=1: the window stays hidden until the first game frame is shown, so its own window can stay up
 // (a loading screen) until then.
@@ -18,6 +19,9 @@
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+// kernel32's K32GetProcessMemoryInfo (psapi.h is not in the build's toolchain): PROCESS_MEMORY_COUNTERS
+typedef struct { DWORD cb, faults; SIZE_T peak_ws, ws, quota[4], pagefile, peak_pagefile; } proc_mem;
+BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process, proc_mem *counters, DWORD size);
 #endif
 
 #include "host.h"
@@ -26,7 +30,9 @@
 static SDL_Window *window;
 static SDL_Gamepad *pad;
 static SDL_Mutex *pad_lock;
-static bool hidden_until_frame, fps_overlay;
+static bool hidden_until_frame, fps_overlay, panel;
+int totk_fps60(void);              // src/host/frame_step.c
+void totk_fps60_set(int on);
 
 static bool env_on(const char *name) {
     const char *e = getenv(name);
@@ -191,22 +197,71 @@ static void toggle_fullscreen(void) {
     SDL_SetWindowFullscreen(window, !on);   // borderless desktop fullscreen (no display mode change)
 }
 
-// Game frame rate and shown frame rate in the title, twice a second.
+// This process's CPU use (all cores = 100 %) and memory since the last call.
+static void process_usage(double *cpu, double *ram_gb) {
+    *cpu = 0; *ram_gb = 0;
+#ifdef _WIN32
+    static uint64_t last_cpu, last_wall;
+    FILETIME created, exited, kernel, user;
+    if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+        uint64_t used = ((uint64_t)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime) +
+                        ((uint64_t)user.dwHighDateTime << 32 | user.dwLowDateTime);   // 100 ns units
+        uint64_t wall = runtime_now_ns() / 100;
+        int cores = SDL_GetNumLogicalCPUCores();
+        if (last_wall && wall > last_wall && cores > 0) *cpu = 100.0 * (double)(used - last_cpu) / ((double)(wall - last_wall) * cores);
+        last_cpu = used; last_wall = wall;
+    }
+    proc_mem pm = {sizeof pm};
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) *ram_gb = pm.ws / 1073741824.0;
+#endif
+}
+
+// F1: what is useful while playing, drawn over the picture (present.c: the first line gold, '~' lines green).
+static void panel_text(char *out, size_t size, double fps, double shown_fps, double worst_ms) {
+    double cpu, ram;
+    process_usage(&cpu, &ram);
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(window, &w, &h);
+    snprintf(out, size,
+             "ULTRATEARS\n"
+             "FPS %.0f  (%.1f MS)  SHOWN %.0f\n"
+             "WORST FRAME %.1f MS\n"
+             "CPU %.0f%%   RAM %.1f GB\n"
+             "GPU %.40s\n"
+             "WINDOW %dX%d\n"
+             "%s60 FPS MOD  %s   [F2]\n"
+             "%sFPS COUNTER %s   [F3]\n"
+             "\n"
+             "F1 CLOSE  F11 FULLSCREEN",
+             fps, fps > 0 ? 1000.0 / fps : 0.0, shown_fps, worst_ms, cpu, ram, vkp_gpu_name(), w, h,
+             totk_fps60() ? "~" : "", totk_fps60() ? "ON " : "OFF", fps_overlay ? "~" : "", fps_overlay ? "ON " : "OFF");
+}
+
+// Game frame rate and shown frame rate in the title, the overlay and the panel, twice a second.
+static bool overlay_dirty;   // a key changed what is shown: redraw now with the last rates
 static void title_update(void) {
     static uint64_t t0, game0, shown0;
+    static double rate, rate_shown, worst;
     uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented();
     if (!t0) { t0 = now; game0 = game; shown0 = shown; return; }
-    if (now - t0 < 500000000) return;
-    double s = (now - t0) / 1e9;
-    char title[128];
-    snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", (game - game0) / s, (shown - shown0) / s);
-    SDL_SetWindowTitle(window, title);
-    if (fps_overlay) {
-        char text[32];
-        snprintf(text, sizeof text, "%.0f FPS", (game - game0) / s);
+    if (now - t0 >= 500000000) {
+        double s = (now - t0) / 1e9;
+        rate = (game - game0) / s; rate_shown = (shown - shown0) / s; worst = vkp_worst_frame_ms();
+        char title[128];
+        snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", rate, rate_shown);
+        SDL_SetWindowTitle(window, title);
+        t0 = now; game0 = game; shown0 = shown;
+    } else if (!overlay_dirty) return;
+    overlay_dirty = false;
+    if (panel) {
+        char text[512];
+        panel_text(text, sizeof text, rate, rate_shown, worst);
         vkp_overlay(text);
-    }
-    t0 = now; game0 = game; shown0 = shown;
+    } else if (fps_overlay) {
+        char text[32];
+        snprintf(text, sizeof text, "%.0f FPS", rate);
+        vkp_overlay(text);
+    } else vkp_overlay(NULL);
 }
 
 _Noreturn void window_loop(void) {
@@ -227,7 +282,17 @@ _Noreturn void window_loop(void) {
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
                         fps_overlay = !fps_overlay;
-                        if (!fps_overlay) vkp_overlay(NULL);
+                        overlay_dirty = true;
+                        break;
+                    }
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F1) {
+                        panel = !panel;
+                        overlay_dirty = true;
+                        break;
+                    }
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F2) {
+                        totk_fps60_set(!totk_fps60());
+                        overlay_dirty = true;
                         break;
                     }
                     int k = mac_key(e.key.scancode);

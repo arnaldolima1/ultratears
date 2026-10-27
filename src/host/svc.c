@@ -31,7 +31,9 @@
 #define ASLR_START    LOW_START
 #define ASLR_SIZE     ((1ULL << 39) - LOW_START)
 #define SYSTEM_RESOURCE_BUDGET (32ULL << 20)
-#define APP_POOL      0xcd500000ULL  /* retail application pool, 3.2 GiB (MacNativeGames' default without 2K heaps) */
+#define APP_POOL_RETAIL 0xcd500000ULL  /* retail application pool, 3.2 GiB (MacNativeGames' default without 2K heaps) */
+uint64_t totk_render_res_extra_bytes(void);   /* render_res.c: the heaps a bigger scene adds (TOTK_RENDER_RES) */
+#define APP_POOL      (APP_POOL_RETAIL + totk_render_res_extra_bytes())
 
 static uint64_t heap_size;
 static unsigned char alias_pages[ALIAS_SIZE / 4096];

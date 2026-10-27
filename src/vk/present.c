@@ -33,14 +33,15 @@ static VkPresentModeKHR mode;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static uint64_t frames_in;           // under mu
-static _Atomic uint64_t presented, game_shown;
+static _Atomic uint64_t presented, game_shown, worst_gap_ns;
 static _Atomic int resized;
 
-// ---- overlay: a line of text (the frame rate) drawn by the CPU into a small host-visible buffer per frame in flight
-// and copied over the swapchain image after the game's picture; no render pass, no shader.
-#define OV_W 640
-#define OV_H 48
-static char ov_text[64];             // under mu; empty = no overlay
+// ---- overlay: text (the frame rate, the F1 panel) drawn by the CPU into a small host-visible buffer per frame in
+// flight and copied over the swapchain image after the game's picture; no render pass, no shader. Lines end with '\n';
+// the first is drawn in gold, a line starting with '~' in green (the '~' is not drawn), the others in cream.
+#define OV_W 760
+#define OV_H 440
+static char ov_text[1024];           // under mu; empty = no overlay
 static VkBuffer ov_buf[FRAMES];
 static VkDeviceMemory ov_mem[FRAMES];
 static uint32_t *ov_map[FRAMES];
@@ -61,11 +62,17 @@ static const uint8_t *glyph(char ch) {
         {15, 16, 16, 14, 1, 1, 30}, {31, 4, 4, 4, 4, 4, 4}, {17, 17, 17, 17, 17, 17, 14},
         {17, 17, 17, 17, 17, 10, 4}, {17, 17, 17, 21, 21, 21, 10}, {17, 17, 10, 4, 10, 17, 17},
         {17, 17, 17, 10, 4, 4, 4}, {31, 1, 2, 4, 8, 16, 31}};
-    static const uint8_t dot[7] = {0, 0, 0, 0, 0, 12, 12}, colon[7] = {0, 12, 12, 0, 12, 12, 0};
+    static const struct { char ch; uint8_t rows[7]; } marks[] = {
+        {'.', {0, 0, 0, 0, 0, 12, 12}}, {':', {0, 12, 12, 0, 12, 12, 0}}, {'-', {0, 0, 0, 31, 0, 0, 0}},
+        {'/', {1, 1, 2, 4, 8, 16, 16}}, {'%', {24, 25, 2, 4, 8, 19, 3}}, {'(', {2, 4, 8, 8, 8, 4, 2}},
+        {')', {8, 4, 2, 2, 2, 4, 8}}, {'[', {14, 8, 8, 8, 8, 8, 14}}, {']', {14, 2, 2, 2, 2, 2, 14}},
+        {'+', {0, 4, 4, 31, 4, 4, 0}}, {',', {0, 0, 0, 0, 12, 4, 8}}, {'|', {4, 4, 4, 4, 4, 4, 4}},
+        {'=', {0, 0, 31, 0, 31, 0, 0}}, {'>', {8, 4, 2, 1, 2, 4, 8}}};
     if (ch >= '0' && ch <= '9') return digits[ch - '0'];
     if (ch >= 'a' && ch <= 'z') ch -= 32;
     if (ch >= 'A' && ch <= 'Z') return letters[ch - 'A'];
-    return ch == '.' ? dot : ch == ':' ? colon : NULL;
+    for (unsigned i = 0; i < sizeof marks / sizeof *marks; i++) if (marks[i].ch == ch) return marks[i].rows;
+    return NULL;
 }
 
 static uint32_t ov_pixel(uint8_t r, uint8_t g, uint8_t b) {
@@ -106,20 +113,37 @@ static int ov_draw(unsigned slot, uint32_t *w, uint32_t *h) {
         }
         ov_map[slot] = map;
     }
-    uint32_t scale = extent.height >= 1400 ? 3 : 2, pad = 3 * scale, adv = 6 * scale, n = (uint32_t)strlen(text);
-    uint32_t bw = 2 * pad + n * adv - scale, bh = 2 * pad + 7 * scale;
+    uint32_t scale = extent.height >= 1400 ? 3 : 2, pad = 4 * scale, adv = 6 * scale, lh = 10 * scale;
+    uint32_t lines = 0, longest = 0;
+    for (const char *s = text; *s;) {   // the box: the longest line, the number of lines
+        const char *e = strchr(s, '\n');
+        uint32_t len = (uint32_t)(e ? (size_t)(e - s) : strlen(s));
+        if (*s == '~' && len) len--;
+        if (len > longest) longest = len;
+        lines++;
+        s = e ? e + 1 : s + strlen(s);
+    }
+    uint32_t bw = 2 * pad + longest * adv - scale, bh = 2 * pad + lines * lh - 3 * scale;
     if (bw > OV_W) bw = OV_W;
+    if (bh > OV_H) bh = OV_H;
     if (bw + 16 > extent.width || bh + 16 > extent.height) return 0;
-    uint32_t *px = ov_map[slot], bg = ov_pixel(16, 20, 18), fg = ov_pixel(233, 214, 140);
-    for (uint32_t i = 0; i < bw * bh; i++) px[i] = bg;
-    for (uint32_t c = 0; c < n; c++) {
-        const uint8_t *g = glyph(text[c]);
+    uint32_t *px = ov_map[slot], bg = ov_pixel(12, 17, 15), edge = ov_pixel(140, 120, 70);
+    uint32_t gold = ov_pixel(243, 226, 169), cream = ov_pixel(220, 214, 196), green = ov_pixel(94, 242, 200);
+    for (uint32_t y = 0; y < bh; y++)
+        for (uint32_t x = 0; x < bw; x++) px[y * bw + x] = lines > 1 && (x == 0 || y == 0 || x == bw - 1 || y == bh - 1) ? edge : bg;
+    uint32_t line = 0, col = 0, fg = gold;
+    for (const char *s = text; *s; s++) {
+        if (*s == '\n') { line++; col = 0; continue; }
+        if (col == 0) fg = line == 0 ? gold : *s == '~' ? green : cream;
+        if (col == 0 && *s == '~') continue;
+        const uint8_t *g = glyph(*s);
+        uint32_t cx = col++;
         if (!g) continue;
         for (uint32_t row = 0; row < 7; row++)
-            for (uint32_t col = 0; col < 5; col++) {
-                if (!(g[row] >> (4 - col) & 1)) continue;
-                uint32_t x0 = pad + c * adv + col * scale, y0 = pad + row * scale;
-                for (uint32_t y = y0; y < y0 + scale; y++)
+            for (uint32_t gc = 0; gc < 5; gc++) {
+                if (!(g[row] >> (4 - gc) & 1)) continue;
+                uint32_t x0 = pad + cx * adv + gc * scale, y0 = pad + line * lh + row * scale;
+                for (uint32_t y = y0; y < y0 + scale && y < bh; y++)
                     for (uint32_t x = x0; x < x0 + scale && x < bw; x++) px[y * bw + x] = fg;
             }
     }
@@ -361,7 +385,14 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
     else if (r != VK_SUCCESS) { vk_check(r, "vkQueuePresentKHR"); return 0; }
     if (out) vk.vkWaitForFences(vkc.device, 1, &in_flight[slot], VK_TRUE, UINT64_MAX);   // the output image is free again after this
     atomic_fetch_add(&presented, 1);
-    if (out) atomic_fetch_add(&game_shown, 1);
+    if (out) {
+        atomic_fetch_add(&game_shown, 1);
+        static uint64_t last;   // the longest time between two game frames shown (vkp_worst_frame_ms)
+        uint64_t now = SDL_GetTicksNS(), gap = last ? now - last : 0;
+        last = now;
+        uint64_t worst = atomic_load(&worst_gap_ns);
+        while (gap > worst && !atomic_compare_exchange_weak(&worst_gap_ns, &worst, gap)) {}
+    }
     return 1;
 }
 
@@ -406,6 +437,8 @@ void vkp_frame(void) {
 void vkp_resized(void) { atomic_store(&resized, 1); }
 uint64_t vkp_presented(void) { return atomic_load(&presented); }
 uint64_t vkp_game_shown(void) { return atomic_load(&game_shown); }
+double vkp_worst_frame_ms(void) { return atomic_exchange(&worst_gap_ns, 0) / 1e6; }
+const char *vkp_gpu_name(void) { return vkc.props.deviceName; }
 uint64_t vkp_frames(void) {
     pthread_mutex_lock(&mu);
     uint64_t n = frames_in;

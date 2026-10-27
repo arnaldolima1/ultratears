@@ -67,6 +67,11 @@ static const char *entry_name(Entry e) { return (const char *)index_bytes + stri
 static char rom_dir[4096];
 static int rom_folder;
 static int rom_fds[NROM];
+/* A file of the RomFS overlay (render_res.c totk_romfs_overlay: the grown heaps of a bigger scene) is served in place of
+   the original: its own descriptor and size per handle, -1 for the original. */
+static int rom_ofd[NROM];
+static uint64_t rom_osize[NROM];
+const char *totk_romfs_overlay(void);
 typedef struct { char *path; uint64_t size; } Walked;
 static Walked *walked;
 static size_t nwalked, walked_cap;
@@ -222,7 +227,18 @@ static unsigned romfs_open(uint64_t *out, const char *path, int mode) {
     if (!p) return R_PATH_NOT_FOUND;
     uint64_t i = file_index(p);
     if (i == UINT64_MAX) return R_PATH_NOT_FOUND;
-    int fd = -1;
+    int fd = -1, ofd = -1;
+    uint64_t osize = 0;
+    const char *ov = totk_romfs_overlay();
+    if (ov) {
+        char full[8192];
+        struct stat st;
+        snprintf(full, sizeof full, "%s/%s", ov, p);
+        if ((ofd = open(full, O_RDONLY | O_BINARY)) >= 0) {
+            if (fstat(ofd, &st)) { close(ofd); ofd = -1; }
+            else { osize = (uint64_t)st.st_size; fprintf(stderr, "[totk] RomFS overlay: %s from %s\n", p, ov); }
+        }
+    }
     if (rom_folder) {
         char full[8192];
         snprintf(full, sizeof full, "%s/%s", rom_dir, p);
@@ -230,7 +246,7 @@ static unsigned romfs_open(uint64_t *out, const char *path, int mode) {
     }
     pthread_mutex_lock(&rom_lock);
     for (uint64_t h = 1; h < NROM; h++)
-        if (!rom_handles[h]) { rom_handles[h] = i + 1; rom_fds[h] = fd; *out = ROM_BASE + h; pthread_mutex_unlock(&rom_lock); return 0; }
+        if (!rom_handles[h]) { rom_handles[h] = i + 1; rom_fds[h] = fd; rom_ofd[h] = ofd; rom_osize[h] = osize; *out = ROM_BASE + h; pthread_mutex_unlock(&rom_lock); return 0; }
     pthread_mutex_unlock(&rom_lock);
     runtime_fail("RomFS handle table full");
 }
@@ -239,11 +255,13 @@ static unsigned romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buff
     uint64_t i = rom_handles[h - ROM_BASE];
     if (!i) return R_ROM_INVALID;
     Entry e = entry(i - 1);
+    int ofd = rom_ofd[h - ROM_BASE];
+    if (ofd >= 0) { e.size = rom_osize[h - ROM_BASE]; e.offset = 0; }
     if ((uint64_t)offset > e.size) return R_ROM_INVALID;
     uint64_t n = size < e.size - (uint64_t)offset ? size : e.size - (uint64_t)offset, done = 0;
     guest_prepare_write(buffer, n);
     while (done < n) {
-        ssize_t r = pread(rom_folder ? rom_fds[h - ROM_BASE] : image_fd, (uint8_t *)buffer + done, (size_t)(n - done), (off_t)(e.offset + (uint64_t)offset + done));
+        ssize_t r = pread(ofd >= 0 ? ofd : rom_folder ? rom_fds[h - ROM_BASE] : image_fd, (uint8_t *)buffer + done, (size_t)(n - done), (off_t)(e.offset + (uint64_t)offset + done));
         need(r > 0, "RomFS image read");
         done += (uint64_t)r;
     }
@@ -253,7 +271,7 @@ static unsigned romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buff
 static unsigned romfs_size(int64_t *out, uint64_t h) {
     uint64_t i = rom_handles[h - ROM_BASE];
     if (!out || !i) return R_ROM_INVALID;
-    *out = (int64_t)entry(i - 1).size;
+    *out = (int64_t)(rom_ofd[h - ROM_BASE] >= 0 ? rom_osize[h - ROM_BASE] : entry(i - 1).size);
     return 0;
 }
 static void romfs_close(uint64_t h) {
@@ -261,6 +279,8 @@ static void romfs_close(uint64_t h) {
     need(rom_handles[h - ROM_BASE] != 0, "close of a closed RomFS handle");
     rom_handles[h - ROM_BASE] = 0;
     if (rom_folder) close(rom_fds[h - ROM_BASE]);
+    if (rom_ofd[h - ROM_BASE] >= 0) close(rom_ofd[h - ROM_BASE]);
+    rom_ofd[h - ROM_BASE] = -1;
     pthread_mutex_unlock(&rom_lock);
 }
 static unsigned romfs_entry_type(int *out, const char *path) {
