@@ -165,6 +165,39 @@ static size_t drop_cull_distance(uint32_t *w, size_t n) {
     return o;
 }
 
+// TOTK draws the scene's depth first and its colour after with depth test EQUAL, each with its own vertex shader. NVN
+// computes the same position in both; AMD's compiler may fuse the multiply-adds differently per shader, so pixels along
+// the triangles' edges failed the EQUAL test and kept the cleared G-buffer (purple dots along the rock's edges). The
+// position gets the Invariant decoration (OpDecorate / OpMemberDecorate ... Invariant, decoration 18) next to its
+// BuiltIn Position one: the same computation gives the same result in every shader. TOTK_VK_INVARIANT=0: as before.
+// Returns the module (a new allocation when grown, the old one freed) and its word count in *n.
+static uint32_t *invariant_position(uint32_t *w, size_t *n) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_VK_INVARIANT"); on = !(e && *e == '0'); }
+    if (!on) return w;
+    for (size_t i = 5; i < *n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || i + wc > *n) return w;
+        int var = op == 71 && wc == 4 && w[i + 2] == 11 && w[i + 3] == 0;      // OpDecorate %v BuiltIn Position
+        int mem = op == 72 && wc == 5 && w[i + 3] == 11 && w[i + 4] == 0;      // OpMemberDecorate %s m BuiltIn Position
+        if (var || mem) {
+            uint32_t add[3] = {var ? (3u << 16 | 71) : (4u << 16 | 72), w[i + 1], var ? 18u : w[i + 2]}, extra = var ? 3 : 4;
+            uint32_t *o = malloc((*n + extra) * 4);
+            if (!o) return w;
+            size_t at = i + wc;
+            memcpy(o, w, at * 4);
+            memcpy(o + at, add, 3 * 4);
+            if (mem) o[at + 3] = 18;
+            memcpy(o + at + extra, w + at, (*n - at) * 4);
+            free(w);
+            *n += extra;
+            return o;
+        }
+        i += wc;
+    }
+    return w;
+}
+
 static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, size_t bytes, VkShaderEXT *obj) {
     VkDescriptorSetLayout layout = vkb_set_layout(stage == VK_SHADER_STAGE_COMPUTE_BIT);
     VkShaderCreateInfoEXT ci = {VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT, .stage = stage,
@@ -285,6 +318,7 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
     free(j);
     // rewrite Binding decorations (OpDecorate %id Binding n: opcode 71, decoration 33)
     size_t nw = drop_cull_distance(spv, nspv / 4);
+    if (nvn_stage == 0) spv = invariant_position(spv, &nw);
     nspv = nw * 4;
     for (size_t i = 5; i < nw;) {
         uint32_t op = spv[i] & 0xffff, wc = spv[i] >> 16;

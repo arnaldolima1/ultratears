@@ -406,6 +406,8 @@ static vkb_image *handle_image(uint64_t h, const view_t **view) {
 // without it they would leave the pass, and the draw saw an empty texture instead (the audit's top substitution).
 static __thread vkb_image *g_fb_rt[9];   // this draw's targets: colour 0-7, depth 8
 static __thread uint32_t g_fb;           // the targets it samples (vkb.h VKB_FB_DEPTH)
+static int g_fb_copy = -1;               // colour targets are sampled from copies (no feedback loop extension; draw)
+static __thread uint32_t g_fb_copied;    // the colour targets whose copies the current pass samples
 
 static int fb_index(const vkb_image *im) {   // the target bit of a sampled image, -1: not a target of this draw
     for (int i = 0; im && i < 9; i++) if (g_fb_rt[i] == im) return i;
@@ -865,8 +867,14 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         const view_t *v = NULL;
         vkb_image *im = h ? handle_image(h, &v) : NULL;
         VkImageViewType vt = view_type_of(sh->tex[i].type);
-        int readable = im && (fb_sampled(im) ? vkb_layout_is(im, vkc.fb_layout)
-                                             : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+        int b = fb_sampled(im) ? fb_index(im) : -1, live_fb = b >= 0;
+        if (b >= 0 && b < 8 && g_fb_copy > 0) {   // a colour target of this draw: its copy (vkb_fb_copy), else read empty
+            vkb_image *cp = (g_fb_copied >> b & 1) ? vkb_fb_copy_of(im) : NULL;
+            im = cp;
+            live_fb = 0;
+        }
+        int readable = im && (live_fb ? vkb_layout_is(im, vkc.fb_layout)
+                                      : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
         VkImageView view = readable ? vkb_view(im, v, 0, (int)vt) : VK_NULL_HANDLE;
         if (sh->tex[i].separate) vkb_audit(A_TEX_SEPARATE, sh->key);
         else if (!(h & 0xFFFFF)) vkb_audit(A_TEX_UNBOUND, sh->key);
@@ -1645,7 +1653,15 @@ void vkb_draw(const uint8_t *a, int indexed) {
         }
     }
     feedback_scan(vs, fs);
-    if (vkb_in_pass() && vkb_pass_fb() != g_fb) vkb_pass_end_r(PE_FEEDBACK);   // [temporary] a pass per change of sampled targets
+    // Without the feedback loop extension colour targets sampled while bound are read from a copy made before the
+    // pass (vkb_tex.c vkb_fb_copy): only depth stays attached in GENERAL. A draw needing copies the pass was not begun
+    // with starts a new pass. TOTK_VK_FB_COPY=0: colour too is sampled in GENERAL (purple lines on AMD).
+    if (g_fb_copy < 0) { const char *e = getenv("TOTK_VK_FB_COPY"); g_fb_copy = !vkc.has_feedback_loop && vkc.fb_layout && !(e && *e == '0'); }
+    static __thread uint64_t copied_pass;   // the pass begun after the copies in g_fb_copied
+    uint32_t want_copy = g_fb_copy ? g_fb & 0xFF : 0, pass_fb = g_fb_copy ? g_fb & VKB_FB_DEPTH : g_fb;
+    if (want_copy && vkb_in_pass() && (copied_pass != vkb_pass_serial() || (want_copy & ~g_fb_copied))) vkb_pass_end_r(PE_FEEDBACK);
+    if (vkb_in_pass() && vkb_pass_fb() != pass_fb) vkb_pass_end_r(PE_FEEDBACK);   // [temporary] a pass per change of sampled targets
+    static __thread uint64_t wrote_pass;   // the pass in which a draw was recorded since the last such barrier
     if ((vkb_in_pass() && (images_need_work(vs, 0) || (fs && images_need_work(fs, 1))))) vkb_pass_end_r(PE_IMAGES);
     if (!vkb_in_pass()) {
         prepare_images(vs, 0);
@@ -1657,7 +1673,16 @@ void vkb_draw(const uint8_t *a, int indexed) {
     VkExtent2D bare = {0, 0};   // a draw without targets covers its viewport
     if (S.nvp && S.vp[0][2] > 0 && S.vp[0][3] > 0)
         bare = (VkExtent2D){(uint32_t)ceilf(S.vp[0][0] + S.vp[0][2]), (uint32_t)ceilf(S.vp[0][1] + S.vp[0][3])};
-    if (!vkb_pass_begin(bare, g_fb)) { vkb_cnt_add(g_skipped[2], 1); vkb_audit(A_DRAW_NO_TARGETS, fs ? fs->key : vs->key); return; }
+    int copies_made = 0;
+    if (want_copy && !vkb_in_pass()) {   // the copies the pass about to begin samples
+        uint32_t ok = 0;
+        for (int i = 0; i < 8; i++)
+            if ((want_copy >> i & 1) && g_fb_rt[i] && vkb_fb_copy(vkb_cmd(), g_fb_rt[i])) ok |= 1u << i;
+        g_fb_copied = ok;
+        copies_made = 1;
+    }
+    if (!vkb_pass_begin(bare, pass_fb)) { vkb_cnt_add(g_skipped[2], 1); vkb_audit(A_DRAW_NO_TARGETS, fs ? fs->key : vs->key); return; }
+    if (copies_made) copied_pass = vkb_pass_serial();
     VkCommandBuffer cb = vkb_cmd();
     writes_t *W = &B->writes;
     W->n = 0;
@@ -1683,7 +1708,6 @@ void vkb_draw(const uint8_t *a, int indexed) {
     // A draw that samples a target of its pass sees what earlier draws of the pass wrote there only after a barrier
     // inside the pass (VK_KHR_dynamic_rendering_local_read, by region: each pixel waits for its own writes). Without it
     // the read may see old contents (as SavageWind found with BotW's terrain, which ORs bits into its G-buffer pixel).
-    static __thread uint64_t wrote_pass;   // the pass in which a draw was recorded since the last such barrier
     static int no_local = -1;   // TOTK_VK_NO_LOCAL_BARRIER=1 (development A/B): no barrier inside the pass
     if (no_local < 0) { const char *e = getenv("TOTK_VK_NO_LOCAL_BARRIER"); no_local = e && *e == '1'; }
     if (g_fb && vkc.has_local_read && !no_local && wrote_pass == vkb_pass_serial()) {

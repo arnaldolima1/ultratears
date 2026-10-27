@@ -70,6 +70,10 @@ typedef struct vkb_image {
 } vkb_image;
 void vkb_image_written(vkb_image *im);   // the GPU writes it (render target, clear, copy, storage)
 int vkb_tex_refresh(VkCommandBuffer cb, vkb_image *im);   // outside a pass: the pending refresh_from copy; 1 if recorded
+// Colour targets sampled while bound without the feedback loop extension: a copy to sample (vkb_tex.c). vkb_fb_copy
+// brings it up to date outside a pass (1: the copy is ready to sample); vkb_fb_copy_of returns it, NULL before.
+int vkb_fb_copy(VkCommandBuffer cb, vkb_image *im);
+vkb_image *vkb_fb_copy_of(vkb_image *im);
 
 vkb_image *vkb_image_of(const tex_t *t);   // creates it on first use; NULL for textures that cannot be images yet
 // Moves the image to `layout` before work of `stage`/`access` (records a barrier on the current command buffer).

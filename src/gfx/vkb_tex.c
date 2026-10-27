@@ -115,6 +115,7 @@ typedef struct entry {
     uint64_t released, released_stamp;      // aside since this present / dirty-tracking generation
     uint8_t has_layout, layout[8];
     struct entry *shape_next, *all_next, **all_pprev;
+    struct entry *fbc; uint64_t fbc_seq;    // its copy for sampling while bound (vkb_fb_copy) and the write it holds
 } entry;
 typedef struct { uint64_t serial; entry *e; } tslot;   // serial 0: free; e NULL: removed
 static tslot *g_tab;
@@ -166,6 +167,11 @@ static void entry_drop(entry *e) {   // g_mu held: out of the indexes, destroyed
     if (e->all_next) e->all_next->all_pprev = e->all_pprev;
     for (int i = 0; i < e->nviews; i++) vkb_destroy_later(e->view[i], VK_NULL_HANDLE, VK_NULL_HANDLE);
     vkb_destroy_later(VK_NULL_HANDLE, e->im.img, e->im.mem);
+    if (e->fbc) {
+        for (int i = 0; i < e->fbc->nviews; i++) vkb_destroy_later(e->fbc->view[i], VK_NULL_HANDLE, VK_NULL_HANDLE);
+        vkb_destroy_later(VK_NULL_HANDLE, e->fbc->im.img, e->fbc->im.mem);
+        free(e->fbc);
+    }
     free(e);
 }
 static void aside_purge(void) {   // g_mu held: entries aside too long (or too many) go
@@ -297,6 +303,49 @@ int vkb_tex_refresh(VkCommandBuffer cb, vkb_image *im) {
     static int said;
     if (said++ < 8) VLOG("image %llu (%ux%u, format %#x) takes the contents of image %llu (%ux%u) at the same memory", (unsigned long long)im->serial,
                          im->width, im->height, im->d.format, (unsigned long long)src->serial, src->width, src->height);
+    return 1;
+}
+
+// ---- colour targets sampled while bound, without VK_EXT_attachment_feedback_loop_dynamic_state (AMD's driver): read
+// in GENERAL by the draws that also write them, the 2x2 quads of neighbouring triangles raced on the pixels of their
+// shared edges (purple lines along the rocks' edges under Hyrule Castle). Such a pass samples a copy made just before
+// it (vkb_draw.c): what the earlier passes drew, as the decals expect, never a pixel being written. The copy is an
+// image like the target (same create parameters, so the same views work), made on first use and updated only when the
+// target was written since.
+vkb_image *vkb_fb_copy_of(vkb_image *im) { entry *c = ((entry *)im)->fbc; return c ? &c->im : NULL; }
+static uint64_t g_fb_copies;
+int vkb_fb_copy(VkCommandBuffer cb, vkb_image *im) {
+    entry *e = (entry *)im;
+    if (im->aspect != VK_IMAGE_ASPECT_COLOR_BIT || vkb_in_pass()) return 0;
+    if (!e->fbc) {
+        vkb_lock(&g_mu, LK_IMAGES);
+        if (!e->fbc) {
+            entry *c = calloc(1, sizeof *c);
+            tex_t t = {0};
+            t.d = im->d; t.serial = im->serial; t.mem = (uint8_t *)im->storage;
+            if (c && create(&c->im, &t)) e->fbc = c;
+            else free(c);
+        }
+        pthread_mutex_unlock(&g_mu);
+        if (!e->fbc) return 0;
+    }
+    vkb_image *cp = &e->fbc->im;
+    if (e->fbc_seq == im->write_seq && cp->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return 1;
+    vkb_image_use(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkb_image_use(cb, cp, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy r[16];
+    uint32_t n = im->levels < 16 ? im->levels : 16;
+    for (uint32_t l = 0; l < n; l++) {
+        uint32_t w = im->width >> l, h = im->height >> l, d = im->depth >> l;
+        r[l] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, im->layers},
+                             .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, im->layers},
+                             .extent = {w ? w : 1, h ? h : 1, d ? d : 1}};
+    }
+    vkb_checkpoint("copy of a sampled target", NULL, NULL);
+    vk.vkCmdCopyImage(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, cp->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, n, r);
+    vkb_image_use(cb, cp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    e->fbc_seq = im->write_seq;
+    g_fb_copies++;
     return 1;
 }
 
