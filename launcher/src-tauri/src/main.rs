@@ -631,10 +631,65 @@ fn remove_temp_dump(app: AppHandle) -> Result<f64, String> {
     Ok(free_space(&h).unwrap_or(0).saturating_sub(before) as f64 / 1e9)
 }
 
+/// Game controllers drive the launcher too: "pad" events with "up" / "down" / "left" / "right" (d-pad or left stick,
+/// repeating while held), "ok" (the bottom face button), "back" (the right one) and "start". Nothing while the game
+/// runs (it reads the controller then).
+fn pad_thread(app: AppHandle) {
+    use gilrs::{Axis, Button, EventType};
+    thread::spawn(move || {
+        let Ok(mut gil) = gilrs::Gilrs::new() else { return };
+        let mut held: Option<(&'static str, std::time::Instant)> = None;   // the direction held and when it repeats
+        loop {
+            let mut out: Vec<&'static str> = Vec::new();
+            while let Some(gilrs::Event { event, .. }) = gil.next_event() {
+                if let EventType::ButtonPressed(b, _) = event {
+                    match b {
+                        Button::South => out.push("ok"),
+                        Button::East => out.push("back"),
+                        Button::Start => out.push("start"),
+                        _ => {}
+                    }
+                }
+            }
+            let mut dir = None;
+            for (_, g) in gil.gamepads() {
+                let (x, y) = (g.value(Axis::LeftStickX), g.value(Axis::LeftStickY));
+                dir = dir
+                    .or(g.is_pressed(Button::DPadUp).then_some("up"))
+                    .or(g.is_pressed(Button::DPadDown).then_some("down"))
+                    .or(g.is_pressed(Button::DPadLeft).then_some("left"))
+                    .or(g.is_pressed(Button::DPadRight).then_some("right"))
+                    .or((y > 0.6).then_some("up"))
+                    .or((y < -0.6).then_some("down"))
+                    .or((x < -0.6).then_some("left"))
+                    .or((x > 0.6).then_some("right"));
+            }
+            let now = std::time::Instant::now();
+            held = match (dir, held) {
+                (Some(d), Some((h, at))) if d == h => {
+                    if now < at { Some((h, at)) } else { out.push(d); Some((d, now + Duration::from_millis(110))) }
+                }
+                (Some(d), _) => { out.push(d); Some((d, now + Duration::from_millis(380))) }
+                (None, _) => None,
+            };
+            if !out.is_empty() && app.state::<Procs>().game.lock().unwrap().is_none() {
+                for e in out {
+                    let _ = app.emit("pad", e);
+                }
+            }
+            thread::sleep(Duration::from_millis(16));
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Procs::default())
+        .setup(|app| {
+            pad_thread(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             status, set_home, start_view, cpu_count, make_res_overlay, custom_art, read_settings, write_settings, start_build, cancel_build, launch_game, stop_game,
             log_tail, open_path, list_extensions, install_extension, remove_extension, run_extension, remove_temp_dump, startup_status

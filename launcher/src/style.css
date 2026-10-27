@@ -582,3 +582,7 @@ select option { background: #111915; color: var(--text); }
 @media (prefers-reduced-motion: reduce) {
   #intro *, #intro { animation-duration: 0.01s !important; animation-delay: 0s !important; }
 }
+
+/* ---- game controller highlight (main.js padMove) */
+.pad-focus { outline: 2px solid var(--gold); outline-offset: 3px; box-shadow: 0 0 18px rgba(216, 191, 126, 0.35); border-radius: 4px; }
+label.toggle.pad-focus { outline-offset: 0; }

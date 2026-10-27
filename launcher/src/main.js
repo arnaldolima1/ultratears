@@ -746,6 +746,82 @@ listen('game-exit', async (e) => {
   }
 });
 
+// ---------------------------------------------------------------- game controller (src-tauri pad_thread)
+// The d-pad or left stick moves a highlight to the nearest control in that direction; the bottom button presses it,
+// the right one goes back (closes a dialog, returns to Início), Start plays. Sliders and lists change with left/right.
+let padEl = null;
+const PAD_SEL = 'button:not(:disabled):not(.win-btn), select, input[type=range], input[type=text], input:not([type]), textarea, .bind-slot, label.toggle';
+function padVisible(el) {
+  if (!el || !el.isConnected) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && !el.closest('.hidden, #min, #max, #close');
+}
+function padCandidates() {
+  const dialog = $('#dialog');
+  const root = !dialog.classList.contains('hidden') ? dialog : document;
+  return [...root.querySelectorAll(PAD_SEL)].filter((el) => padVisible(el) && !(root === document && el.closest('#dialog')));
+}
+function padFocus(el) {
+  if (padEl) padEl.classList.remove('pad-focus');
+  padEl = el;
+  if (!el) return;
+  el.classList.add('pad-focus');
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+function padMove(dir) {
+  const list = padCandidates();
+  if (!padVisible(padEl) || !list.includes(padEl)) return padFocus(list.find((e) => e.id === 'play') || list[0]);
+  if (padEl.matches('input[type=range]') && (dir === 'left' || dir === 'right')) {
+    if (dir === 'left') padEl.stepDown(); else padEl.stepUp();
+    padEl.dispatchEvent(new Event('input')); padEl.dispatchEvent(new Event('change'));
+    return;
+  }
+  if (padEl.matches('select') && (dir === 'left' || dir === 'right')) {
+    const i = padEl.selectedIndex + (dir === 'left' ? -1 : 1);
+    if (i >= 0 && i < padEl.options.length) { padEl.selectedIndex = i; padEl.dispatchEvent(new Event('change')); }
+    return;
+  }
+  const a = padEl.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of list) {
+    if (el === padEl) continue;
+    const b = el.getBoundingClientRect(), dx = b.left + b.width / 2 - ax, dy = b.top + b.height / 2 - ay;
+    const along = { up: -dy, down: dy, left: -dx, right: dx }[dir], across = dir === 'up' || dir === 'down' ? Math.abs(dx) : Math.abs(dy);
+    if (along <= 4) continue;
+    const score = along + across * 2;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  if (best) padFocus(best);
+}
+function padPress() {
+  const el = padEl;
+  if (!padVisible(el)) return padMove('down');
+  if (el.matches('.bind-slot')) { if (!el.classList.contains('listening')) el.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true })); return; }
+  if (el.matches('input[type=text], input:not([type]), textarea')) { el.focus(); return; }
+  if (el.matches('select, input[type=range]')) return;
+  el.click();
+}
+listen('pad', ({ payload }) => {
+  if (!document.hasFocus()) return;
+  if (!$('#intro').classList.contains('gone')) { dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); return; }
+  if (payload === 'ok') return padPress();
+  if (payload === 'back') {
+    if (!$('#dialog').classList.contains('hidden')) return $('#dialog-ok').click();
+    if (listening) return stopListening();
+    if (document.activeElement && document.activeElement.matches('input, textarea')) return document.activeElement.blur();
+    showView('home');
+    return padFocus($('#play'));
+  }
+  if (payload === 'start') {
+    showView('home');
+    padFocus($('#play'));
+    if (!$('#play').disabled) $('#play').click();
+    return;
+  }
+  padMove(payload);
+});
+addEventListener('mousemove', () => padFocus(null));
+
 // ---------------------------------------------------------------- start
 // ---------------------------------------------------------------- opening
 // index.html #intro: plays once at start (prefs.intro, Configurações > Launcher); a click or a key skips it.
