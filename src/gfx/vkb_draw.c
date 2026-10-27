@@ -1255,9 +1255,14 @@ static void set_vertex_input(VkCommandBuffer cb, uint32_t int_inputs) {
         VkBuffer buf;
         VkDeviceSize off;
         VkDeviceSize size = S.vbuf[s].size;
+        // (fork) Without native vertex input dynamic state (MoltenVK) the shader object layer bakes the input into its
+        // pipelines with the stride left dynamic: vkCmdSetVertexInputEXT's stride does not reach the driver, so it is
+        // given here too, else it is 0 and every vertex reads the first (nothing is drawn).
+        VkDeviceSize stride = S.vstream[s].stride;
+        const VkDeviceSize *strides = vkc.has_vertex_input_ds ? NULL : &stride;
         if (S.vbuf[s].address && size && vkb_gpu_addr(S.vbuf[s].address, size, &buf, &off)) {
-            VkDeviceSize key[3] = {(VkDeviceSize)(uintptr_t)buf, off, size};
-            if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &buf, &off, &size, NULL);
+            VkDeviceSize key[4] = {(VkDeviceSize)(uintptr_t)buf, off, size, stride};
+            if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &buf, &off, &size, strides);
         }
         else {
             if (S.vbuf[s].address) {   // [temporary] not in an imported pool (a virtual pool: sparse binding later): zeros
@@ -1266,8 +1271,8 @@ static void set_vertex_input(VkCommandBuffer cb, uint32_t int_inputs) {
                 if (said++ < 16) VLOG("[temporary] vertex buffer %#llx+%llu (stream %u) not in an imported pool: zeros are bound",
                                       (unsigned long long)S.vbuf[s].address, (unsigned long long)S.vbuf[s].size, s);
             }
-            VkDeviceSize z = 0, zs = 65536, key[3] = {(VkDeviceSize)(uintptr_t)g_zero, 0, 65536};
-            if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &g_zero, &z, &zs, NULL);
+            VkDeviceSize z = 0, zs = 65536, key[4] = {(VkDeviceSize)(uintptr_t)g_zero, 0, 65536, stride};
+            if (dyn(D_VB0 + (int)s, key, sizeof key)) vk.vkCmdBindVertexBuffers2(cb, s, 1, &g_zero, &z, &zs, strides);
         }
     }
     struct { uint32_t nb, na; VkVertexInputBindingDescription2EXT b[16]; VkVertexInputAttributeDescription2EXT a[16]; } vi;
