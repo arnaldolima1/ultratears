@@ -228,23 +228,42 @@
               </label>
             </div>
 
-            <h3 class="mt">Teclado</h3>
-            <p class="hint">Layout fixo (o mesmo do MacNativeGames). Um controle conectado funciona junto com o teclado.</p>
-            <div class="keymap">
-              <div><span class="btn-name">Mover</span><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></div>
-              <div><span class="btn-name">Câmera</span><span class="keys"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span></div>
-              <div><span class="btn-name">A</span><span class="keys"><kbd>J</kbd></span></div>
-              <div><span class="btn-name">B</span><span class="keys"><kbd>K</kbd><kbd>Espaço</kbd></span></div>
-              <div><span class="btn-name">X</span><span class="keys"><kbd>I</kbd></span></div>
-              <div><span class="btn-name">Y</span><span class="keys"><kbd>U</kbd></span></div>
-              <div><span class="btn-name">L / R</span><span class="keys"><kbd>Q</kbd><kbd>E</kbd></span></div>
-              <div><span class="btn-name">ZL / ZR</span><span class="keys"><kbd>Option</kbd><kbd>Shift</kbd></span></div>
-              <div><span class="btn-name">Clique L / R</span><span class="keys"><kbd>Z</kbd><kbd>C</kbd></span></div>
-              <div><span class="btn-name">Direcional</span><span class="keys"><kbd>T</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd></span></div>
-              <div><span class="btn-name">+ (menu)</span><span class="keys"><kbd>Return</kbd></span></div>
-              <div><span class="btn-name">− (mapa)</span><span class="keys"><kbd>Tab</kbd><kbd>Esc</kbd></span></div>
+            <h3 class="mt">Teclado e mouse</h3>
+            <label class="field">
+              <span>Câmera</span>
+              <select id="set-cam">
+                <option value="">Teclas (setas)</option>
+                <option value="mouse">Mouse</option>
+              </select>
+            </label>
+            <div class="sub-block" id="mouse-block">
+              <label class="field">
+                <span>Sensibilidade: <b id="mouse-sens-val"></b></span>
+                <input type="range" id="set-mouse-sens" min="0.005" max="0.2" step="0.005" />
+              </label>
+              <label class="field">
+                <span>Mirando (arco, armas): <b id="mouse-aim-val"></b></span>
+                <input type="range" id="set-mouse-aim" min="0.1" max="2" step="0.05" />
+              </label>
+              <label class="field">
+                <span>Luneta: <b id="mouse-scope-val"></b></span>
+                <input type="range" id="set-mouse-scope" min="0.1" max="2" step="0.05" />
+              </label>
+              <label class="field">
+                <span>Suavização</span>
+                <select id="set-mouse-smooth">
+                  <option value="0">Nenhuma</option>
+                  <option value="5">Leve (5 ms)</option>
+                  <option value="10">Média (10 ms)</option>
+                </select>
+              </label>
+              <label class="toggle"><input type="checkbox" id="set-mouse-invert" /><span class="knob"></span><div><b>Inverter vertical</b><small>Mouse para cima olha para baixo.</small></div></label>
+              <p class="hint">No jogo o cursor fica preso na janela: <kbd>F8</kbd> solta e prende de novo (clicar na janela também prende). Com o mouse na câmera, o giroscópio do controle não gira a câmera.</p>
             </div>
-            <p class="hint">No jogo: <kbd>F1</kbd> painel de desempenho, <kbd>F2</kbd> 60 FPS, <kbd>F3</kbd> contador de FPS, <kbd>F11</kbd> tela cheia.</p>
+            <p class="hint">Clique num campo e aperte a tecla ou o botão do mouse. Clique fora para cancelar; <b>×</b> apaga. Um controle conectado funciona junto.</p>
+            <div class="bindings" id="bindings"></div>
+            <button class="ghost small" id="keys-reset">Restaurar teclas padrão</button>
+            <p class="hint">No jogo: <kbd>F1</kbd> painel de desempenho, <kbd>F2</kbd> 60 FPS, <kbd>F3</kbd> contador de FPS, <kbd>F8</kbd> cursor, <kbd>F11</kbd> tela cheia.</p>
           </div>
           <div class="set-page" id="set-launcher">
             <h3>Launcher</h3>

@@ -142,10 +142,15 @@ def render_store(word, what, index, offset):
     return patch
 
 
+# PC mouse camera (upstream PR #20, RxEmam): tools/lifter/camera_patches_v143.py
+from camera_patches_v143 import CAMERA_PATCHES_V143  # noqa: E402
+
+
 PATCHES = {
     0x8005843e0: drs_off,
     MAIN + 0x585e50: render_store(0xbd0cc660, 'render width', 0, 0xcc4),
     MAIN + 0x585e60: render_store(0xbd0cca60, 'render height', 1, 0xcc8),
     **{MAIN + off: controller(off) for off in FPS60_CONTROLLER},
     **{MAIN + off: p for off, p in FPS60.items()},
+    **CAMERA_PATCHES_V143,
 }

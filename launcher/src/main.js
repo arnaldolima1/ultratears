@@ -135,6 +135,7 @@ function renderInstallSource() {
 // ---------------------------------------------------------------- settings (settings.cfg)
 const KNOWN = ['TOTK_FPS_OVERLAY', 'TOTK_FULLSCREEN', 'TOTK_GYRO_AXES', 'TOTK_FPS60', 'TOTK_RENDER_RES', 'TOTK_RUMBLE', 'TOTK_GYRO',
   'TOTK_GYRO_DEADZONE', 'TOTK_OPERATION_MODE'];
+const isKnown = (k) => KNOWN.includes(k) || k.startsWith('TOTK_KEY_') || MOUSE_KEYS.includes(k);
 function showResField() { $('#res-field').classList.toggle('on', $('#set-resmod').checked); }
 let settings = {};
 async function loadSettings() {
@@ -149,12 +150,13 @@ async function loadSettings() {
   $('#set-gyro-dz').value = settings.TOTK_GYRO_DEADZONE || 0;
   $('#set-gyro-dz').dataset.auto = settings.TOTK_GYRO_DEADZONE ? '' : '1';
   showGyro();
+  loadInput();
   $('#set-fps60').checked = settings.TOTK_FPS60 === '1';
   $('#mod-fps60').classList.toggle('on', $('#set-fps60').checked);
   $('#set-resmod').checked = !!settings.TOTK_RENDER_RES;
   if (settings.TOTK_RENDER_RES) $('#set-res').value = settings.TOTK_RENDER_RES;
   showResField();
-  $('#set-extra').value = Object.entries(settings).filter(([k]) => !KNOWN.includes(k)).map(([k, v]) => `${k}=${v}`).join('\n');
+  $('#set-extra').value = Object.entries(settings).filter(([k]) => !isKnown(k)).map(([k, v]) => `${k}=${v}`).join('\n');
   $('#set-borderless').checked = prefs.frameless;
   $('#set-music').checked = prefs.music;
   $('#set-volume').value = prefs.volume;
@@ -171,6 +173,7 @@ async function saveSettings() {
     TOTK_OPERATION_MODE: $('#set-handheld').checked ? 'handheld' : '',
     TOTK_FPS60: $('#set-fps60').checked ? '1' : '',
     TOTK_RENDER_RES: $('#set-resmod').checked ? $('#set-res').value : '',
+    ...inputSettings(),
   };
   for (const line of $('#set-extra').value.split('\n')) {
     const m = line.trim().match(/^(TOTK_[A-Z0-9_]+)\s*=\s*(.*)$/);
@@ -204,6 +207,174 @@ $('#set-gyro-preset').onchange = (e) => {
   if (e.target.value === 'custom') $('#set-gyro').focus(); else saveSettings();
 };
 ['#set-gyro', '#set-extra'].forEach((s) => ($(s).onchange = saveSettings));
+
+// Keyboard and mouse (host/keyboard_input.c, host/mouse_camera.c: upstream PR #20). Bindings are SDL scancodes, two per
+// action, 512-514 the mouse buttons (src/host/keyboard_bindings.def; only those differing from it are saved).
+const MOUSE_KEYS = ['TOTK_CAMERA_MODE', 'TOTK_MOUSE_CAMERA_VERSION', 'TOTK_MOUSE_BACKEND', 'TOTK_MOUSE_LOOK_DEG_PER_COUNT',
+  'TOTK_MOUSE_AIM_MULTIPLIER', 'TOTK_MOUSE_SCOPE_MULTIPLIER', 'TOTK_MOUSE_SMOOTH_MS', 'TOTK_MOUSE_INVERT_Y', 'TOTK_MOUSE_SENSITIVITY'];
+const ACTIONS = [   // [id, group, name, what it does, default 1, default 2]
+  ['MOVE_UP', 'Movimento', 'Frente', 'Analógico esquerdo para cima', 26, 0],
+  ['MOVE_DOWN', 'Movimento', 'Trás', 'Analógico esquerdo para baixo', 22, 0],
+  ['MOVE_LEFT', 'Movimento', 'Esquerda', 'Analógico esquerdo para a esquerda', 4, 0],
+  ['MOVE_RIGHT', 'Movimento', 'Direita', 'Analógico esquerdo para a direita', 7, 0],
+  ['LOOK_UP', 'Câmera', 'Olhar para cima', 'Também move a luneta e seleções', 82, 0],
+  ['LOOK_DOWN', 'Câmera', 'Olhar para baixo', '', 81, 0],
+  ['LOOK_LEFT', 'Câmera', 'Olhar à esquerda', '', 80, 0],
+  ['LOOK_RIGHT', 'Câmera', 'Olhar à direita', '', 79, 0],
+  ['A', 'Ações', 'A · Interagir', 'Pegar, falar, confirmar', 8, 0],
+  ['B', 'Ações', 'B · Correr / cancelar', 'Correr (segurar), guardar a arma', 225, 41],
+  ['X', 'Ações', 'X · Pular', 'Parapente no ar', 44, 0],
+  ['Y', 'Ações', 'Y · Atacar', 'Ataque carregado (segurar)', 512, 9],
+  ['L', 'Ações', 'L · Habilidade', 'Roda de habilidades (segurar)', 6, 0],
+  ['R', 'Ações', 'R · Arremessar', 'Mira o arremesso, solta para jogar', 23, 0],
+  ['ZL', 'Ações', 'ZL · Focar / escudo', 'Travar no alvo, erguer o escudo', 514, 20],
+  ['ZR', 'Ações', 'ZR · Arco', 'Puxar (segurar), soltar dispara', 513, 21],
+  ['STICK_L', 'Ações', 'Agachar', 'Clique do analógico esquerdo', 224, 0],
+  ['STICK_R', 'Ações', 'Luneta', 'Clique do analógico direito', 226, 0],
+  ['PLUS', 'Menus', '+ · Inventário', 'Bolsa e pausa', 43, 0],
+  ['MINUS', 'Menus', '− · Purah Pad', 'Mapa e diário', 53, 16],
+  ['DPAD_UP', 'Menus rápidos', 'Materiais', 'Direcional para cima (segurar)', 25, 0],
+  ['DPAD_DOWN', 'Menus rápidos', 'Assobiar', 'Chama o cavalo', 10, 0],
+  ['DPAD_LEFT', 'Menus rápidos', 'Escudos', 'Direcional para a esquerda (segurar)', 29, 0],
+  ['DPAD_RIGHT', 'Menus rápidos', 'Armas / arcos', 'Direcional para a direita (segurar)', 27, 0],
+];
+const RESERVED = new Set([58, 59, 60, 65, 68]);   // F1-F3 (overlays, 60 FPS), F8 (cursor), F11 (fullscreen)
+const SDL_CODE = (() => {   // KeyboardEvent.code -> SDL scancode (USB HID usage)
+  const m = { Enter: 40, Escape: 41, Backspace: 42, Tab: 43, Space: 44, Minus: 45, Equal: 46, BracketLeft: 47, BracketRight: 48,
+    Backslash: 49, Semicolon: 51, Quote: 52, Backquote: 53, Comma: 54, Period: 55, Slash: 56, CapsLock: 57, PrintScreen: 70,
+    ScrollLock: 71, Pause: 72, Insert: 73, Home: 74, PageUp: 75, Delete: 76, End: 77, PageDown: 78, ArrowRight: 79,
+    ArrowLeft: 80, ArrowDown: 81, ArrowUp: 82, NumLock: 83, NumpadDivide: 84, NumpadMultiply: 85, NumpadSubtract: 86,
+    NumpadAdd: 87, NumpadEnter: 88, Numpad0: 98, NumpadDecimal: 99, IntlBackslash: 100, ControlLeft: 224, ShiftLeft: 225,
+    AltLeft: 226, MetaLeft: 227, ControlRight: 228, ShiftRight: 229, AltRight: 230, MetaRight: 231 };
+  for (let i = 0; i < 26; i++) m['Key' + String.fromCharCode(65 + i)] = 4 + i;
+  for (let i = 1; i <= 9; i++) { m['Digit' + i] = 29 + i; m['Numpad' + i] = 88 + i; }
+  m.Digit0 = 39;
+  for (let i = 1; i <= 12; i++) m['F' + i] = 57 + i;
+  return m;
+})();
+const MAC = navigator.platform.startsWith('Mac');
+function keyName(code) {
+  if (!code) return '—';
+  if (code === 512) return 'Mouse esq.';
+  if (code === 513) return 'Mouse dir.';
+  if (code === 514) return 'Mouse meio';
+  const named = { 40: MAC ? 'Return' : 'Enter', 41: 'Esc', 42: 'Backspace', 43: 'Tab', 44: 'Espaço', 57: 'Caps Lock', 79: '→', 80: '←',
+    81: '↓', 82: '↑', 224: 'Ctrl esq.', 225: 'Shift esq.', 226: MAC ? 'Option esq.' : 'Alt esq.', 227: MAC ? 'Cmd esq.' : 'Win esq.',
+    228: 'Ctrl dir.', 229: 'Shift dir.', 230: MAC ? 'Option dir.' : 'Alt dir.', 231: MAC ? 'Cmd dir.' : 'Win dir.', 53: '`' };
+  if (named[code]) return named[code];
+  if (code >= 4 && code <= 29) return String.fromCharCode(61 + code);
+  if (code >= 30 && code <= 39) return String((code - 29) % 10);
+  if (code >= 58 && code <= 69) return 'F' + (code - 57);
+  const back = Object.entries(SDL_CODE).find(([, v]) => v === code);
+  return back ? back[0].replace(/^Numpad/, 'Num ') : `Tecla ${code}`;
+}
+let binds = {};   // id -> [code, code]
+let listening = null;   // {id, slot, el}
+function loadInput() {
+  $('#set-cam').value = settings.TOTK_CAMERA_MODE === 'mouse' ? 'mouse' : '';
+  $('#set-mouse-sens').value = settings.TOTK_MOUSE_LOOK_DEG_PER_COUNT || 0.04;
+  $('#set-mouse-aim').value = settings.TOTK_MOUSE_AIM_MULTIPLIER || 1;
+  $('#set-mouse-scope').value = settings.TOTK_MOUSE_SCOPE_MULTIPLIER || 1;
+  $('#set-mouse-smooth').value = ['5', '10'].includes(settings.TOTK_MOUSE_SMOOTH_MS) ? settings.TOTK_MOUSE_SMOOTH_MS : '0';
+  $('#set-mouse-invert').checked = settings.TOTK_MOUSE_INVERT_Y === '1';
+  binds = {};
+  for (const [id, , , , d1, d2] of ACTIONS) {
+    const m = (settings['TOTK_KEY_' + id] || '').match(/^(\d+),(\d+)$/);
+    binds[id] = m ? [+m[1], +m[2]] : [d1, d2];
+  }
+  showInput();
+}
+function inputSettings() {
+  const mouse = $('#set-cam').value === 'mouse', s = {};
+  s.TOTK_CAMERA_MODE = mouse ? 'mouse' : '';
+  s.TOTK_MOUSE_CAMERA_VERSION = mouse ? '2' : '';
+  const num = (sel, def) => (+$(sel).value === def ? '' : String(+$(sel).value));
+  s.TOTK_MOUSE_LOOK_DEG_PER_COUNT = num('#set-mouse-sens', 0.04);
+  s.TOTK_MOUSE_AIM_MULTIPLIER = num('#set-mouse-aim', 1);
+  s.TOTK_MOUSE_SCOPE_MULTIPLIER = num('#set-mouse-scope', 1);
+  s.TOTK_MOUSE_SMOOTH_MS = $('#set-mouse-smooth').value === '0' ? '' : $('#set-mouse-smooth').value;
+  s.TOTK_MOUSE_INVERT_Y = $('#set-mouse-invert').checked ? '1' : '';
+  for (const [id, , , , d1, d2] of ACTIONS) {
+    const [a, b] = binds[id];
+    s['TOTK_KEY_' + id] = a === d1 && b === d2 ? '' : `${a},${b}`;
+  }
+  return s;
+}
+function showInput() {
+  $('#set-control').classList.toggle('keys-camera', $('#set-cam').value !== 'mouse');
+  $('#mouse-sens-val').textContent = `${(+$('#set-mouse-sens').value).toFixed(3)} °/ponto`;
+  $('#mouse-aim-val').textContent = `${(+$('#set-mouse-aim').value).toFixed(2)}×`;
+  $('#mouse-scope-val').textContent = `${(+$('#set-mouse-scope').value).toFixed(2)}×`;
+  const box = $('#bindings');
+  box.textContent = '';
+  let group = '';
+  for (const [id, g, name, what] of ACTIONS) {
+    if (g !== group) { group = g; const h = document.createElement('h4'); h.textContent = g; box.append(h); }
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+    const label = document.createElement('div');
+    label.className = 'what';
+    label.textContent = name;
+    if (what) { const sm = document.createElement('small'); sm.textContent = what; label.append(sm); }
+    row.append(label);
+    binds[id].forEach((code, slot) => {
+      const el = document.createElement('div');
+      el.className = 'bind-slot' + (code ? '' : ' empty');
+      el.tabIndex = 0;
+      el.textContent = keyName(code);
+      const x = document.createElement('button');
+      x.className = 'clear';
+      x.title = 'Apagar';
+      x.textContent = '×';
+      x.onmousedown = (e) => e.stopPropagation();
+      x.onclick = (e) => { e.stopPropagation(); stopListening(); binds[id][slot] = 0; showInput(); saveSettings(); };
+      el.append(x);
+      el.onmousedown = (e) => {
+        if (listening && listening.el === el) { e.preventDefault(); assign([512, 514, 513][e.button]); return; }
+        stopListening();
+        listening = { id, slot, el };
+        el.classList.add('listening');
+        el.firstChild.textContent = 'Aperte…';
+        e.preventDefault();
+      };
+      el.oncontextmenu = (e) => e.preventDefault();
+      row.append(el);
+    });
+    box.append(row);
+  }
+}
+function stopListening() {
+  if (!listening) return;
+  listening.el.classList.remove('listening');
+  listening = null;
+  showInput();
+}
+function assign(code) {
+  if (!listening || code === undefined) return;
+  const { id, slot } = listening;
+  for (const k in binds) binds[k] = binds[k].map((c) => (c === code ? 0 : c));   // one action per key (as the game does)
+  binds[id][slot] = code;
+  listening = null;
+  showInput();
+  saveSettings();
+}
+addEventListener('keydown', (e) => {
+  if (!listening) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const code = SDL_CODE[e.code];
+  if (code && !RESERVED.has(code)) assign(code);
+}, true);
+addEventListener('mousedown', (e) => { if (listening && !listening.el.contains(e.target)) stopListening(); });
+$('#keys-reset').onclick = () => {
+  stopListening();
+  for (const [id, , , , d1, d2] of ACTIONS) binds[id] = [d1, d2];
+  showInput();
+  saveSettings();
+};
+$('#set-cam').onchange = () => { showInput(); saveSettings(); };
+['#set-mouse-sens', '#set-mouse-aim', '#set-mouse-scope'].forEach((sel) => { $(sel).oninput = showInput; $(sel).onchange = saveSettings; });
+['#set-mouse-smooth', '#set-mouse-invert'].forEach((sel) => ($(sel).onchange = saveSettings));
 // The resolution mod: the heap overlay for the chosen size is made first (tools/make_res_overlay.py), then saved.
 async function applyRes() {
   showResField();

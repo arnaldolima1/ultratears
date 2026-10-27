@@ -498,6 +498,24 @@ select option { background: #111915; color: var(--text); }
 .keymap .btn-name { font-size: 13px; color: var(--text); }
 .keymap .keys { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .set-page.disabled-gyro #gyro-block { opacity: 0.4; pointer-events: none; }
+.set-page.keys-camera #mouse-block { display: none; }
+.bindings { margin: 0 0 14px; }
+.bindings h4 { margin: 14px 0 6px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold-lo); }
+.bind-row { display: grid; grid-template-columns: minmax(0, 1fr) 128px 128px; gap: 6px; align-items: center; padding: 5px 10px;
+  border: 1px solid rgba(232, 212, 154, 0.08); border-radius: 4px; background: rgba(0, 0, 0, 0.18); margin-bottom: 4px; }
+.bind-row .what { font-size: 13px; color: var(--text); min-width: 0; }
+.bind-row .what small { display: block; color: var(--muted); font-size: 11px; }
+.bind-slot { position: relative; display: flex; align-items: center; justify-content: center; height: 28px; padding: 0 22px 0 8px;
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: rgba(255, 255, 255, 0.04);
+  color: var(--gold-hi); font: 12px Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bind-slot.empty { color: var(--muted); }
+.bind-slot.listening { border-color: var(--gold); color: var(--gold); animation: bind-listen 1s ease-in-out infinite alternate; }
+.bind-slot .clear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); border: 0; background: none;
+  color: var(--muted); font-size: 14px; line-height: 1; padding: 2px 5px; }
+.bind-slot .clear:hover { color: var(--gold-hi); }
+.bind-slot.empty .clear { display: none; }
+@keyframes bind-listen { from { background: rgba(216, 191, 126, 0.04); } to { background: rgba(216, 191, 126, 0.16); } }
+@media (max-width: 640px) { .bind-row { grid-template-columns: 1fr 1fr; } .bind-row .what { grid-column: 1 / -1; } }
 
 /* ---- panels fit the window; their content scrolls under the fixed title */
 .view > .panel { display: flex; flex-direction: column; min-height: 0; max-height: 100%; width: 100%; box-sizing: border-box; }

@@ -1,7 +1,7 @@
 // The window (milestone 3.2): SDL3 on the process's main thread — window, keyboard, game controllers with rumble —
 // while the game runs on its own thread (boot.c). The picture goes through src/vk/present.c.
-//  - keyboard: SDL scancodes become the Mac virtual key codes the controller emulation of overrides_input.c (from
-//    MacNativeGames) expects, so the key layout is theirs (J/K/I/U = A/B/X/Y, WASD + arrows = sticks, ...);
+//  - keyboard: physical SDL scancodes use the saved bindings in keyboard_input.c;
+//  - mouse camera: relative motion drives the right stick; F8 releases/recaptures the cursor;
 //  - game controllers: buttons by position as on a Switch controller (the right face button is A), sticks with Y up;
 //  - rumble: the game's vibration values (hid_feedback.c) drive the controller's low / high frequency motors.
 //  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen.
@@ -26,6 +26,7 @@ BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process, proc_mem *counters, DWORD si
 #endif
 
 #include "host.h"
+#include "keyboard_input.h"
 #include "../vk/present.h"
 
 static SDL_Window *window;
@@ -72,24 +73,17 @@ static bool startup_holding(void) {
     return hold;
 }
 
-static int mac_key(SDL_Scancode s) {
-    switch (s) {
-    case SDL_SCANCODE_A: return 0; case SDL_SCANCODE_S: return 1; case SDL_SCANCODE_D: return 2;
-    case SDL_SCANCODE_F: return 3; case SDL_SCANCODE_H: return 4; case SDL_SCANCODE_G: return 5;
-    case SDL_SCANCODE_Z: return 6; case SDL_SCANCODE_X: return 7; case SDL_SCANCODE_C: return 8;
-    case SDL_SCANCODE_V: return 9; case SDL_SCANCODE_B: return 11; case SDL_SCANCODE_Q: return 12;
-    case SDL_SCANCODE_W: return 13; case SDL_SCANCODE_E: return 14; case SDL_SCANCODE_R: return 15;
-    case SDL_SCANCODE_Y: return 16; case SDL_SCANCODE_T: return 17; case SDL_SCANCODE_O: return 31;
-    case SDL_SCANCODE_U: return 32; case SDL_SCANCODE_I: return 34; case SDL_SCANCODE_P: return 35;
-    case SDL_SCANCODE_L: return 37; case SDL_SCANCODE_J: return 38; case SDL_SCANCODE_K: return 40;
-    case SDL_SCANCODE_N: return 45; case SDL_SCANCODE_M: return 46; case SDL_SCANCODE_RETURN: return 36;
-    case SDL_SCANCODE_TAB: return 48; case SDL_SCANCODE_SPACE: return 49; case SDL_SCANCODE_ESCAPE: return 53;
-    case SDL_SCANCODE_LSHIFT: return 56; case SDL_SCANCODE_RSHIFT: return 60; case SDL_SCANCODE_LALT: return 58;
-    case SDL_SCANCODE_RALT: return 61; case SDL_SCANCODE_LCTRL: return 59; case SDL_SCANCODE_RCTRL: return 62;
-    case SDL_SCANCODE_LEFT: return 123; case SDL_SCANCODE_RIGHT: return 124; case SDL_SCANCODE_DOWN: return 125;
-    case SDL_SCANCODE_UP: return 126;
-    default: return -1;
+static void mouse_capture(int on) {
+    on = on && keyboard_input_mouse_mode();
+    if (SDL_GetWindowRelativeMouseMode(window) != !!on) {
+        if (!SDL_SetWindowRelativeMouseMode(window, !!on))
+            fprintf(stderr, "[totk-input] cannot %s mouse: %s\n", on ? "capture" : "release", SDL_GetError());
+        SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
     }
+    bool actual = window && SDL_GetWindowRelativeMouseMode(window);
+    mouse_camera_set_capture(actual);
+    runtime_input_mouse_clear();
+    keyboard_input_release_mouse_buttons();
 }
 
 // Switch npad button bits (libnx HidNpadButton): A B X Y StickL StickR L R ZL ZR Plus Minus Left Up Right Down
@@ -97,7 +91,7 @@ static int32_t stick(Sint16 v, int invert) {
     int32_t x = invert ? -(int32_t)v : v;
     return x > 32767 ? 32767 : x < -32767 ? -32767 : x;
 }
-static void pad_update(void) {
+static void pad_update_at(uint64_t event_ns) {
     RuntimeGamepadState s = {0};
     if (pad) {
         static const struct { SDL_GamepadButton b; uint64_t bit; } map[] = {
@@ -116,9 +110,12 @@ static void pad_update(void) {
         s.rx = stick(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX), 0);
         s.ry = stick(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY), 1);
         s.connected = 1;
+        uint64_t ts = event_ns ? event_ns : SDL_GetTicksNS();
+        mouse_camera_offer_stick((float)s.rx / 32767.0f, (float)s.ry / 32767.0f, ts);
     }
     runtime_gamepad_set(&s);
 }
+static void pad_update(void) { pad_update_at(SDL_GetTicksNS()); }
 
 // hid_feedback.c: the game's vibration value for one side (0 left, 1 right). A Switch controller has a low and a high
 // frequency actuator per side; an SDL controller has a low and a high frequency motor, so each takes the stronger side.
@@ -156,6 +153,8 @@ static void mac_dock_show(void) {
 
 int window_init(void) {
     SDL_SetMainReady();
+    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1");
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");   // 10 ms device buffer at 48 kHz
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");        // the exe's icon resource (assets/icon.ico via build/ultratears.rc) for the window
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
@@ -194,6 +193,8 @@ int window_init(void) {
 #endif
     }
     if (env_on("TOTK_FULLSCREEN")) SDL_SetWindowFullscreen(window, true);   // on the display the window is on
+    keyboard_input_init();   // (upstream PR #20) bindings and the mouse camera, from TOTK_KEY_* / TOTK_MOUSE_*
+    mouse_capture((SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0);
     if (!vkp_init(window))
         runtime_fail("Vulkan initialization failed (Vulkan 1.3 with VK_EXT_shader_object is required)");
     return 1;
@@ -337,6 +338,10 @@ _Noreturn void window_loop(void) {
                     fprintf(stderr, "[totk] window closed\n");
                     _Exit(0);
                 case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F8) {
+                        if (keyboard_input_mouse_mode()) mouse_capture(!SDL_GetWindowRelativeMouseMode(window));
+                        break;
+                    }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                         (e.key.scancode == SDL_SCANCODE_F11 ||
                          (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT)))) {
@@ -358,16 +363,39 @@ _Noreturn void window_loop(void) {
                         overlay_dirty = true;
                         break;
                     }
-                    int k = mac_key(e.key.scancode);
-                    if (k >= 0 && !e.key.repeat) runtime_input_key((unsigned)k, e.type == SDL_EVENT_KEY_DOWN);
+                    if (!e.key.repeat) keyboard_input_key(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN);
                     break;
                 }
-                case SDL_EVENT_WINDOW_FOCUS_LOST: runtime_input_clear(); break;
+                case SDL_EVENT_MOUSE_MOTION: {
+                    bool captured = SDL_GetWindowRelativeMouseMode(window);
+                    mouse_camera_set_capture(captured);
+                    if (captured) {
+                        uint64_t ts = e.motion.timestamp ? e.motion.timestamp : SDL_GetTicksNS();
+                        mouse_camera_push_motion((double)e.motion.xrel, (double)e.motion.yrel, ts);
+                        runtime_input_mouse_motion(e.motion.xrel, e.motion.yrel);
+                    }
+                    break;
+                }
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    if (keyboard_input_mouse_mode() && !SDL_GetWindowRelativeMouseMode(window)) {
+                        if (e.button.button == SDL_BUTTON_LEFT) mouse_capture(1);
+                        break;   // recapture is not an attack; free-cursor clicks do not drive the game
+                    }
+                    keyboard_input_mouse_button(e.button.button, 1);
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                    keyboard_input_mouse_button(e.button.button, 0);
+                    break;
+                case SDL_EVENT_WINDOW_FOCUS_LOST: mouse_capture(0); mouse_camera_reset(MOUSE_RESET_FOCUS_LOST); keyboard_input_clear(); break;
+                case SDL_EVENT_WINDOW_FOCUS_GAINED: mouse_capture(1); pad_update(); break;
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: vkp_resized(); break;
                 case SDL_EVENT_GAMEPAD_ADDED: open_pad(e.gdevice.which); break;
                 case SDL_EVENT_GAMEPAD_REMOVED: close_pad(e.gdevice.which); break;
-                case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
-                    pad_update();
+                case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                    pad_update_at(e.gaxis.timestamp ? e.gaxis.timestamp : SDL_GetTicksNS());
+                    break;
+                case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+                    pad_update_at(e.gbutton.timestamp ? e.gbutton.timestamp : SDL_GetTicksNS());
                     break;
                 case SDL_EVENT_GAMEPAD_SENSOR_UPDATE: pad_sensor(&e.gsensor); break;
                 default: break;
@@ -383,6 +411,7 @@ _Noreturn void window_loop(void) {
             SDL_ShowWindow(window);
             SDL_RaiseWindow(window);
         }
+        if (pad) pad_update();
         title_update();
     }
 }
