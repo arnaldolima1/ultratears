@@ -155,7 +155,8 @@ void vkb_tex_b2b_log(uint64_t src, uint64_t dst, uint64_t n);   // TOTK_B2B_LOG:
 int vkb_rt_log_match(const tex_t *t);       // TOTK_RT_LOG: the format and size being logged (backend_vk.c)
 int vkb_rt_log_d(const nvn_texdesc *d);
 uint64_t vkb_pool_room(uint64_t addr);       // bytes from addr to the end of its imported pool (0: none)
-int vkb_span_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // a range across pools, imported on its own
+int vkb_span_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // a range across pools, laid out as the GPU sees it
+uint64_t nvn_va2cpu(uint64_t va);           // a GPU address the game gave: the CPU address of that byte (hle_nvn.c)
 void vkb_tex_dump(const char *dir);         // TOTK_DUMP: the GPU-written images as BMP (development)       // the game finalized the texture: image freed after the GPU is done
 
 // ---- vkb_draw.c: render state, texture / sampler pools, draws

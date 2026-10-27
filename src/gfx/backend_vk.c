@@ -676,60 +676,128 @@ uint64_t vkb_pool_room(uint64_t addr) {   // bytes from addr to the end of the i
     vkb_rw_read_end(&g_pool_mu);
     return n;
 }
-// A range that runs past the end of its pool, across other pools and the memory between them: on the Switch the GPU
-// sees game memory as one, here each pool is a buffer of its own. TOTK's Depths terrain vertices, pulled by the vertex
-// shaders from a storage buffer, lie in such a range (~258 MiB from inside one pool on; bound empty before, the ground
-// lost its material pass; bound up to the pool's end, the vertices past it exploded into shards, L20). Such a range is
-// imported as one buffer of its own, kept for later draws (the least recently used of SPANS goes).
-typedef struct { uint64_t lo, hi, used; VkBuffer buf; VkDeviceMemory mem; } span_t;
-enum { SPANS = 32 };
+
+// ---- ranges across pools, in the GPU's address space (hle_nvn.c "GPU addresses, as the Switch's") ----
+// A range the game binds that runs on past the end of its pool continues, on the Switch, into the pools that follow in
+// the GPU's address space (TOTK's Depths terrain: vertices read through a buffer bound in the pool before theirs, L20).
+// Here pools are buffers of their own, so such a range is put together: a device-local buffer laid out as the GPU
+// address space, from the start of the pool the range starts in, filled from the pools' pieces at the start of a
+// submission (outside a pass) and kept current from their written pages. Until it is filled a draw gets an empty buffer.
+// [temporary] GPU writes into the pools behind a span are not seen by it until they are back in game memory.
+uint64_t nvn_cpu2va(uint64_t cpu);
+int nvn_va_pieces(uint64_t va, uint64_t len, void (*fn)(void *ctx, uint64_t cpu, uint64_t off, uint64_t n), void *ctx);
+typedef struct { uint64_t va, len, used_sub, stamp; VkBuffer buf; VkDeviceMemory mem; int filled; } span_t;
+enum { SPANS = 16 };
 static span_t g_spans[SPANS];
 static int g_nspans;
 static pthread_mutex_t g_span_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_span_bytes_in;   // copied into spans (the per-frame log line)
 int vkb_span_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
-    // [experiment, off] TOTK_VK_SPAN=1: with these ranges bound the Depths' terrain shot out as shards: the addresses
-    // the game computes there are not those of the data in our memory layout (pools contiguous in the Switch GPU's
-    // address space?), so they are not imported by default (L20)
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("TOTK_VK_SPAN"); on = e && *e == '1'; }
-    if (!on || g_ok != 1 || !addr || !len || len > (1ull << 30)) return 0;
-    uint64_t now = vkb_frame();
-    pthread_mutex_lock(&g_span_mu);
-    for (int i = 0; i < g_nspans; i++)
-        if (addr >= g_spans[i].lo && addr + len <= g_spans[i].hi) {
-            g_spans[i].used = now;
-            *buf = g_spans[i].buf; *off = addr - g_spans[i].lo;
-            pthread_mutex_unlock(&g_span_mu);
-            return 1;
-        }
-    uintptr_t align = vkc.host_pointer_alignment ? vkc.host_pointer_alignment : 4096;
-    uintptr_t a = (uintptr_t)addr & ~(align - 1), b = ((uintptr_t)(addr + len) + align - 1) & ~(align - 1);
-    span_t s = {a, b, now};
-    if (!import_host(a, b, &s.buf, &s.mem)) { pthread_mutex_unlock(&g_span_mu); return 0; }
-    int k = g_nspans < SPANS ? g_nspans++ : 0;
-    if (k == 0 && g_nspans == SPANS)
-        for (int i = 1; i < SPANS; i++) if (g_spans[i].used < g_spans[k].used) k = i;
-    if (k < g_nspans && g_spans[k].buf) destroy_later(VK_NULL_HANDLE, VK_NULL_HANDLE, g_spans[k].mem, g_spans[k].buf);
-    g_spans[k] = s;
-    static int said;
-    if (said++ < 16) {   // what is there: pages all zero, inside / past the starting pool, virtual pools
-        int totk_vpool_gather(uintptr_t va, uint64_t len, void *dst);
-        uint64_t room = vkb_pool_room(addr), zin = 0, zout = 0, nin = 0, nout = 0;
-        for (uint64_t p = a; p < b; p += 4096) {
-            const uint64_t *q = (const uint64_t *)(uintptr_t)p;
-            int z = 1;
-            for (int w = 0; w < 512 && z; w++) z = !q[w];
-            if (p < addr + room) { nin++; zin += (uint64_t)z; } else { nout++; zout += (uint64_t)z; }
-        }
-        VLOG("memory %#llx..%#llx (%llu MiB, %llu MiB past the end of its pool) imported for a range the GPU reads: zero pages %llu of %llu "
-             "in the pool, %llu of %llu past it; virtual pool at start %d, at end %d", (unsigned long long)a, (unsigned long long)b,
-             (unsigned long long)((b - a) >> 20), (unsigned long long)((len - room) >> 20), (unsigned long long)zin, (unsigned long long)nin,
-             (unsigned long long)zout, (unsigned long long)nout, totk_vpool_gather((uintptr_t)addr, 0, NULL),
-             totk_vpool_gather((uintptr_t)(addr + len - 1), 0, NULL));
+    if (g_ok != 1 || !addr || !len || len > (1ull << 31)) return 0;
+    uint64_t va = nvn_cpu2va(addr), sub = g_fence + 1;
+    if (!va || va == addr) return 0;   // GPU addresses off, or not in a pool
+    uint64_t lo = va;
+    {   // from the start of the pool the range starts in: draws starting at other places in it share the span
+        vkb_rw_read(&g_pool_mu, LK_POOLS);
+        const pool_ent *p = pool_find((uintptr_t)addr, 1);
+        if (p) lo = va - (addr - p->lo);
+        vkb_rw_read_end(&g_pool_mu);
     }
-    *buf = s.buf; *off = addr - a;
+    uint64_t hi = (va + len + 0xfff) & ~0xfffull;
+    pthread_mutex_lock(&g_span_mu);
+    int k = -1;
+    for (int i = 0; i < g_nspans; i++) if (g_spans[i].va == lo) { k = i; break; }
+    if (k >= 0 && g_spans[k].va + g_spans[k].len < hi) {   // reaches further than the span made so far: made again, larger
+        destroy_later(VK_NULL_HANDLE, VK_NULL_HANDLE, g_spans[k].mem, g_spans[k].buf);
+        g_spans[k] = g_spans[--g_nspans];
+        k = -1;
+    }
+    if (k < 0) {
+        if (g_nspans == SPANS) {   // the least recently used goes
+            int o = 0;
+            for (int i = 1; i < SPANS; i++) if (g_spans[i].used_sub < g_spans[o].used_sub) o = i;
+            destroy_later(VK_NULL_HANDLE, VK_NULL_HANDLE, g_spans[o].mem, g_spans[o].buf);
+            g_spans[o] = g_spans[--g_nspans];
+        }
+        span_t s = {lo, hi - lo, sub};
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = s.len,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+        VkMemoryRequirements req;
+        if (vk.vkCreateBuffer(vkc.device, &bi, NULL, &s.buf) != VK_SUCCESS) { pthread_mutex_unlock(&g_span_mu); return 0; }
+        vk.vkGetBufferMemoryRequirements(vkc.device, s.buf, &req);
+        uint32_t type = UINT32_MAX;   // device-local
+        for (uint32_t t = 0; t < vkc.memory.memoryTypeCount && type == UINT32_MAX; t++)
+            if ((req.memoryTypeBits >> t & 1) && (vkc.memory.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) type = t;
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+        if (ai.memoryTypeIndex == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &s.mem) != VK_SUCCESS) {
+            vk.vkDestroyBuffer(vkc.device, s.buf, NULL);
+            pthread_mutex_unlock(&g_span_mu);
+            return 0;
+        }
+        vk.vkBindBufferMemory(vkc.device, s.buf, s.mem, 0);
+        static int said;
+        if (said++ < 16) VLOG("[gpu va] range %#llx+%#llx across pools (from %#llx): a buffer of %llu MiB laid out as the GPU address space",
+                              (unsigned long long)va, (unsigned long long)len, (unsigned long long)addr, (unsigned long long)(s.len >> 20));
+        k = g_nspans++;
+        g_spans[k] = s;
+    }
+    span_t *s = &g_spans[k];
+    s->used_sub = sub;
+    int ok = s->filled;
+    if (ok) { *buf = s->buf; *off = va - s->va; }
     pthread_mutex_unlock(&g_span_mu);
-    return 1;
+    return ok;
+}
+typedef struct { span_t *s; VkCommandBuffer cb; int whole; uint64_t bytes; } span_fill;
+static void span_run(void *ctx, size_t off, size_t n) {   // nvn_dirty_runs inside one piece: ctx carries the piece
+    struct piece { span_fill *f; uint64_t cpu, soff; } *pc = ctx;
+    const pool_ent *p = pool_find((uintptr_t)(pc->cpu + off), n);   // g_pool_mu held (span_presync)
+    if (p) {
+        VkBufferCopy c = {(pc->cpu + off) - p->base, pc->soff + off, n};
+        vk.vkCmdCopyBuffer(pc->f->cb, p->buf, pc->f->s->buf, 1, &c);
+        pc->f->bytes += n;
+    }
+}
+static void span_piece(void *ctx, uint64_t cpu, uint64_t off, uint64_t n) {
+    span_fill *f = ctx;
+    struct piece { span_fill *f; uint64_t cpu, soff; } pc = {f, cpu, off};
+    if (f->whole || nvn_dirty_runs((const void *)(uintptr_t)cpu, n, f->s->stamp, 65536, span_run, &pc) < 0) span_run(&pc, 0, n);
+}
+// At the first pass of a submission (shadow_presync's place): spans used lately, filled or brought up to date.
+static void span_presync(void) {
+    static _Atomic uint64_t done_sub;
+    uint64_t sub = g_fence + 1;
+    if (!g_nspans || atomic_load(&done_sub) == sub) return;
+    pthread_mutex_lock(&g_span_mu);
+    if (atomic_exchange(&done_sub, sub) == sub) { pthread_mutex_unlock(&g_span_mu); return; }
+    vkb_rw_read(&g_pool_mu, LK_POOLS);   // the pool table, then the prologue: the order sync_flush takes them in
+    int mt = t_recording, any = 0;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    for (int i = 0; i < g_nspans; i++) {
+        span_t *s = &g_spans[i];
+        if (s->used_sub + 2 < sub) continue;
+        if (!cb) {
+            if (mt) vkb_pro_begin(); else pass_end_why(PE_SHADOW);
+            cb = vkb_cmd();
+            shadow_barrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        }
+        span_fill f = {s, cb, !s->filled, 0};
+        uint64_t stamp = nvn_dirty_now();
+        nvn_va_pieces(s->va, s->len, span_piece, &f);
+        s->stamp = stamp;
+        s->filled = 1;
+        g_span_bytes_in += f.bytes;
+        any = 1;
+    }
+    if (cb) {
+        if (any) shadow_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        if (mt) vkb_pro_end();
+    }
+    vkb_rw_read_end(&g_pool_mu);
+    pthread_mutex_unlock(&g_span_mu);
 }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     if (g_ok != 1) { *buf = NULL; *off = 0; return 0; }
@@ -1313,9 +1381,11 @@ static uint32_t level_size(uint32_t v, const view_t *view) {
 static __thread uint64_t g_pass_serial;   // passes begun on this thread (vkb_pass_serial: per-pass state of the draws)
 uint64_t vkb_pass_serial(void) { return g_pass_serial; }
 static void shadow_presync(void);
+static void span_presync(void);
 static int pass_begin(VkExtent2D bare, uint32_t fb) {
     if (g_in_pass) return 1;
     shadow_presync();
+    span_presync();   // ranges across pools brought up to date (outside a pass)
     g_pass_serial++;
     if (!vkc.has_feedback_loop) fb = 0;
     g_pass_fb = fb;

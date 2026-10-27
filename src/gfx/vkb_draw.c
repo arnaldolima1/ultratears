@@ -747,6 +747,7 @@ static void sbuf_range(const vkb_shader *sh, int stage, int i, uint64_t *addr, u
         if (u->addr && sh->sbuf[i].off + 12 <= u->size) {
             uint32_t n;
             vkb_ucap_read(u->addr + sh->sbuf[i].off, addr, 8);
+            *addr = nvn_va2cpu(*addr);   // the game writes GPU addresses into its uniforms (hle_nvn.c)
             vkb_ucap_read(u->addr + sh->sbuf[i].off + 8, &n, 4);
             *size = n;
         }
