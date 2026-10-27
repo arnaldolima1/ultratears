@@ -63,7 +63,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhGQTU5MjM3OEEzMUFDRTUKUldUbHJER0tONUtsaitrVTBNdXFUYW03OVFOVVNXQTkvbTFoYnd4WWpVMWJoZkpZNVVZVVpMZTAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY1NDg1NjkyRDg1M0JGNjIKUldSaXYxUFlrbFpJWlJrL1lBKzdkNEhBZWl3c0hybWw1S1JOZ1ZzN3BIUzNuOEg3bkc4MjZjYjAK",
       "endpoints": [
         "https://github.com/arnaldolima1/ultratears/releases/latest/download/latest.json"
       ],
