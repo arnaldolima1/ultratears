@@ -2214,8 +2214,15 @@ uint64_t nvn_frame_ctl(void) { return g_frame_ctl; }
 NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
     Cpu *c = guest_cpu();
     if (c && c->x[30] == FRAME_CONTROLLER_LR) {
-        static int max_iv = -1;
-        if (max_iv < 0) { const char *e = getenv("TOTK_MAX_INTERVAL"); max_iv = e && *e ? atoi(e) : 2; LOG("[nvn] present interval limit %d (TOTK_MAX_INTERVAL; 0 = the game's own limit)", max_iv); }
+        /* With the 60 FPS mod (src/host/frame_step.c) the default limit is 1: the controller's estimate of the frame's
+           work is the console's, and on a PC with time to spare it still dropped to interval 2 (30 fps) every few
+           seconds. The real-time frame step keeps the game's speed right when a frame takes longer than 1/60 s. */
+        extern int totk_fps60(void);
+        static int env_iv = -2;
+        if (env_iv == -2) { const char *e = getenv("TOTK_MAX_INTERVAL"); env_iv = e && *e ? atoi(e) : -1; }
+        int max_iv = env_iv >= 0 ? env_iv : totk_fps60() ? 1 : 2;
+        static int logged_iv = -1;
+        if (logged_iv != max_iv) { logged_iv = max_iv; LOG("[nvn] present interval limit %d (TOTK_MAX_INTERVAL%s; 0 = the game's own limit)", max_iv, env_iv < 0 && max_iv == 1 ? ", 60 FPS mod" : ""); }
         if (!g_frame_ctl) { g_frame_ctl = c->x[20]; if (!g_game_sys) { g_game_sys = c->x[19]; LOG("[nvn] game system object %#llx, interval controller %#llx", (unsigned long long)g_game_sys, (unsigned long long)g_frame_ctl); } }
         uint32_t *ctl = (uint32_t *)(uintptr_t)c->x[20];
         if (max_iv > 0 && ctl[1] > (uint32_t)max_iv) ctl[1] = (uint32_t)max_iv;
