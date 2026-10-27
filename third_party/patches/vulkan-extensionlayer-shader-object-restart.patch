@@ -1,0 +1,58 @@
+diff --git a/layers/shader_object/shader_object.cpp b/layers/shader_object/shader_object.cpp
+index 6103fa2..0edcb69 100644
+--- a/layers/shader_object/shader_object.cpp
++++ b/layers/shader_object/shader_object.cpp
+@@ -45,6 +45,26 @@
+ #define kLayerSettingsForceEnable "force_enable"
+ #define kLayerSettingsDisablePipelinePreCaching "disable_pipeline_pre_caching"
+ 
++// UltraTears (macOS): Metal cannot turn primitive restart off, and MoltenVK fails every pipeline asked for that (nothing
++// drawn; a failed pipeline later bound crashes). Every pipeline this layer makes goes through here with it on.
++static VkResult CreateGraphicsPipelinesRestartOn(PFN_vkCreateGraphicsPipelines create, VkDevice device, VkPipelineCache cache,
++                                                 uint32_t count, const VkGraphicsPipelineCreateInfo* infos,
++                                                 const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
++#ifdef __APPLE__
++    std::vector<VkGraphicsPipelineCreateInfo> copies(infos, infos + count);
++    std::vector<VkPipelineInputAssemblyStateCreateInfo> assembly(count);
++    for (uint32_t i = 0; i < count; ++i) {
++        if (!copies[i].pInputAssemblyState) continue;
++        assembly[i] = *copies[i].pInputAssemblyState;
++        assembly[i].primitiveRestartEnable = VK_TRUE;
++        copies[i].pInputAssemblyState = &assembly[i];
++    }
++    return create(device, cache, count, copies.data(), allocator, pipelines);
++#else
++    return create(device, cache, count, infos, allocator, pipelines);
++#endif
++}
++
+ #define SHADER_OBJECT_BINARY_VERSION 1
+ 
+ //#define ENABLE_DEBUG_LOG
+@@ -1450,7 +1470,7 @@ static VkPipeline CreateGraphicsPipelineForCommandBufferState(CommandBufferData&
+            create_info.layout != VK_NULL_HANDLE);
+ 
+     VkPipeline pipeline;
+-    VkResult result = cmd_data.device_data->vtable.CreateGraphicsPipelines(
++    VkResult result = CreateGraphicsPipelinesRestartOn(cmd_data.device_data->vtable.CreateGraphicsPipelines, 
+         cmd_data.device_data->device, vertex_or_mesh_shader->cache, 1, &create_info, nullptr, &pipeline);
+     ASSERT(result == VK_SUCCESS);
+     UNUSED(result);
+@@ -1614,7 +1634,7 @@ void AddGraphicsPipelineToCache(DeviceData const& deviceData, VkAllocationCallba
+            create_info.layout != VK_NULL_HANDLE);
+ 
+     VkPipeline temp_pipeline;
+-    VkResult result = vtable.CreateGraphicsPipelines(deviceData.device, cache, 1, &create_info, nullptr, &temp_pipeline);
++    VkResult result = CreateGraphicsPipelinesRestartOn(vtable.CreateGraphicsPipelines, deviceData.device, cache, 1, &create_info, nullptr, &temp_pipeline);
+     if (result == VK_SUCCESS) {
+         vtable.DestroyPipeline(deviceData.device, temp_pipeline, nullptr);
+     } else {
+@@ -1803,7 +1823,7 @@ PartialPipeline CreatePartiallyCompiledPipeline(DeviceData const& deviceData, Vk
+ 
+     ASSERT(use_descriptor_heap || create_info.layout != VK_NULL_HANDLE);
+ 
+-    VkResult result = deviceData.vtable.CreateGraphicsPipelines(deviceData.device, cache, 1, &create_info, &allocator, &partial_pipeline.pipeline);
++    VkResult result = CreateGraphicsPipelinesRestartOn(deviceData.vtable.CreateGraphicsPipelines, deviceData.device, cache, 1, &create_info, &allocator, &partial_pipeline.pipeline);
+     ASSERT(result == VK_SUCCESS);
+     UNUSED(result);
+ 

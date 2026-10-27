@@ -18,8 +18,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
-from toolchain import CLANG64, env as tool_env  # noqa: E402
-from build_game import run_limited  # noqa: E402
+from toolchain import CC, CXX, EXE, HOMEBREW, MAC, env as tool_env, run_limited  # noqa: E402
 from romfs import RomFS  # noqa: E402
 
 SOURCES_C = ['tools/bc7build/bc7build.c', 'src/gfx/tex/astc.c', 'src/gfx/tex/bc7key.c']
@@ -27,7 +26,7 @@ SOURCES_CXX = ['src/gfx/tex/bc7.cpp', 'src/gfx/tex/bc7enc/bc7enc.cpp', 'src/gfx/
 
 
 def build_tool(env):
-    exe = ROOT / 'build/bc7build.exe'
+    exe = ROOT / f'build/bc7build{EXE}'
     newest = max((ROOT / s).stat().st_mtime for s in SOURCES_C + SOURCES_CXX)
     if exe.exists() and exe.stat().st_mtime > newest:
         return exe
@@ -36,12 +35,13 @@ def build_tool(env):
     for s in SOURCES_C + SOURCES_CXX:
         cxx = s.endswith('.cpp')
         obj = ROOT / 'build/obj' / ('bc7build_' + s.replace('/', '_').rsplit('.', 1)[0] + '.o')
-        cmd = [str(CLANG64 / ('clang++.exe' if cxx else 'clang.exe')), '-O2', '-march=x86-64-v3', '-w', '-c', str(ROOT / s), '-o', str(obj)]
+        cmd = [CXX if cxx else CC, '-O2', *([f'-I{HOMEBREW}/include'] if MAC else ['-march=x86-64-v3']), '-w', '-c', str(ROOT / s), '-o', str(obj)]
         if cxx:
             cmd += ['-std=c++17', '-fno-exceptions', '-fno-rtti']
         subprocess.run(cmd, check=True, env=env)
         objs.append(str(obj))
-    subprocess.run([str(CLANG64 / 'clang.exe'), '-fuse-ld=lld', '-o', str(exe)] + objs + ['-static', '-pthread', '-lzstd', '-lc++'], check=True, env=env)
+    link = [f'-L{HOMEBREW}/lib', '-lzstd', '-lc++'] if MAC else ['-fuse-ld=lld', '-static', '-pthread', '-lzstd', '-lc++']
+    subprocess.run([CC, '-o', str(exe)] + objs + link, check=True, env=env)
     return exe
 
 
@@ -71,8 +71,7 @@ def main():
     print(f'{len(files)} texture files -> {cache}', flush=True)
     t0 = time.time()
     rc = run_limited([str(exe), str(rom.image or rom.root), str(lst), str(cache), str(a.threads), str(a.quality),
-                      str(a.max_block_area)], env,
-                     (1 << a.threads) - 1)
+                      str(a.max_block_area)], env, a.threads)
     print(f'{time.time() - t0:.0f} s', flush=True)
     sys.exit(rc)
 

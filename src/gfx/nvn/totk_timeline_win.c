@@ -6,7 +6,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>
+static uint32_t GetCurrentThreadId(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return (uint32_t)t; }   // (fork: macOS)
+#endif
 
 #include "totk_timeline.h"
 

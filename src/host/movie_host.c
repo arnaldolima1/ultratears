@@ -26,7 +26,11 @@
    library (which aborts). */
 #include "host.h"  // [port] runtime.h
 #include "../runtime/hle.h"
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#else
 #include <emmintrin.h>  // [port] arm_neon.h
+#endif
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -169,11 +173,19 @@ static void to_nv12(const vpx_image_t *img, uint8_t *dst, int w, int h) {
         const uint8_t *u = img->planes[VPX_PLANE_U] + (size_t)y * img->stride[VPX_PLANE_U];
         const uint8_t *v = img->planes[VPX_PLANE_V] + (size_t)y * img->stride[VPX_PLANE_V];
         uint8_t *o = uv + (size_t)y * w; int x = 0;
+#if defined(__aarch64__)
+        for (; x + 16 <= w / 2; x += 16)   // (fork: NEON) U and V interleaved by the store itself
+        {
+            uint8x16x2_t uv_ = {{vld1q_u8(u + x), vld1q_u8(v + x)}};
+            vst2q_u8(o + 2 * x, uv_);
+        }
+#else
         for (; x + 16 <= w / 2; x += 16) {   // [port] SSE2
             __m128i a = _mm_loadu_si128((const __m128i *)(u + x)), b = _mm_loadu_si128((const __m128i *)(v + x));
             _mm_storeu_si128((__m128i *)(o + 2 * x), _mm_unpacklo_epi8(a, b));
             _mm_storeu_si128((__m128i *)(o + 2 * x + 16), _mm_unpackhi_epi8(a, b));
         }
+#endif
         for (; x < w / 2; x++) { o[2 * x] = u[x]; o[2 * x + 1] = v[x]; }
     }
 }

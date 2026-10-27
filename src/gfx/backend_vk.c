@@ -11,7 +11,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include "compat/gfx_compat.h"
 #include "host/hle.h"
@@ -49,6 +51,39 @@ static vkb_rw g_pool_mu;   // recording threads look pools up for every draw (re
 static uint64_t g_pool_bytes;
 
 // vkb_lock.h: Windows slim reader-writer locks (zero-initialised = unlocked), with the wait measured as vkb_lock does
+#ifdef __APPLE__
+// (fork: macOS) pthread rwlocks, initialised by the first user (state 0 -> 1 initialising -> 2 ready)
+static pthread_rwlock_t *rw_get(vkb_rw *l) {
+    int s = atomic_load_explicit(&l->state, memory_order_acquire);
+    if (s == 2) return &l->rw;
+    int zero = 0;
+    if (atomic_compare_exchange_strong(&l->state, &zero, 1)) {
+        pthread_rwlock_init(&l->rw, NULL);
+        atomic_store_explicit(&l->state, 2, memory_order_release);
+    } else while (atomic_load_explicit(&l->state, memory_order_acquire) != 2) sched_yield();
+    return &l->rw;
+}
+static void rw_waited(int kind, uint64_t t0) {
+    atomic_fetch_add_explicit(&vkb_lock_wait_ns[kind], runtime_now_ns() - t0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&vkb_lock_waits[kind], 1, memory_order_relaxed);
+}
+void vkb_rw_read(vkb_rw *l, int kind) {
+    pthread_rwlock_t *rw = rw_get(l);
+    if (!pthread_rwlock_tryrdlock(rw)) return;
+    uint64_t t0 = runtime_now_ns();
+    pthread_rwlock_rdlock(rw);
+    rw_waited(kind, t0);
+}
+void vkb_rw_read_end(vkb_rw *l) { pthread_rwlock_unlock(&l->rw); }
+void vkb_rw_write(vkb_rw *l, int kind) {
+    pthread_rwlock_t *rw = rw_get(l);
+    if (!pthread_rwlock_trywrlock(rw)) return;
+    uint64_t t0 = runtime_now_ns();
+    pthread_rwlock_wrlock(rw);
+    rw_waited(kind, t0);
+}
+void vkb_rw_write_end(vkb_rw *l) { pthread_rwlock_unlock(&l->rw); }
+#else
 void vkb_rw_read(vkb_rw *l, int kind) {
     if (TryAcquireSRWLockShared((PSRWLOCK)l)) return;
     uint64_t t0 = runtime_now_ns();
@@ -65,6 +100,7 @@ void vkb_rw_write(vkb_rw *l, int kind) {
     atomic_fetch_add_explicit(&vkb_lock_waits[kind], 1, memory_order_relaxed);
 }
 void vkb_rw_write_end(vkb_rw *l) { ReleaseSRWLockExclusive((PSRWLOCK)l); }
+#endif
 
 // ---- per recording thread (vkb_mt.c design, implemented below in "several recording threads")
 static __thread int t_worker;          // vkb_worker(): 0 the translation thread (and any other), 1.. the recording threads
@@ -127,9 +163,23 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     uintptr_t lo = (uintptr_t)mem, hi = lo + size, a = lo & ~(align - 1), b = (hi + align - 1) & ~(align - 1);
     // The import needs committed memory: guest pages are committed on first touch, so the pool is committed now.
     // A virtual pool is an inaccessible address range (totk_vpool_win.c): no memory to import (sparse binding, later).
-    MEMORY_BASIC_INFORMATION mi;
     if (a >= GUEST_LO && b <= GUEST_HI) plat_commit(a, b - a);
-    else if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || mi.Protect == PAGE_NOACCESS) return;
+#ifdef _WIN32
+    else {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || mi.Protect == PAGE_NOACCESS) return;
+    }
+#else   // (fork: macOS) a virtual pool's range is mapped PROT_NONE (totk_vpool_win.c)
+    else {
+        mach_vm_address_t ra = a;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&ri, &cnt, &obj) != KERN_SUCCESS ||
+            ra > a || ri.protection == VM_PROT_NONE) return;
+    }
+#endif
     VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (!vk_check(vk.vkGetMemoryHostPointerPropertiesEXT(vkc.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                           (void *)a, &hp), "host pointer properties")) return;
@@ -204,6 +254,13 @@ void mtl_pool_del(const void *mem) {
 }
 
 void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) { (void)p; (void)off; (void)n; }   // zero-copy: nothing cached
+
+// The memory readout hle_nvn.c hands over every 300 frames where the host reports resident memory (fork: macOS; the
+// Windows stand-in's task_info fails, so it is never called there): one log line now and then.
+void mtl_mem_stat(unsigned long long frame, unsigned long long resident_mb) {
+    if (frame % 9000 == 0)
+        VLOG("memory: frame %llu, resident %llu MB, guest pools imported %.0f MB", frame, resident_mb, g_pool_bytes / 1048576.0);
+}
 
 static __thread int g_pool_last;   // the entry this thread found last (draws use a few pools over and over)
 static const pool_ent *pool_find(uintptr_t addr, uint64_t len) {   // g_pool_mu held
@@ -598,12 +655,17 @@ static void checkpoint_report(void) {
         VLOG("  stage %#llx: #%u present %llu %s %s %s", (unsigned long long)d[i].stage, c->n, (unsigned long long)c->frame, c->what, c->k1, c->k2);
         unsigned long long a = strtoull(c->k1, NULL, 16);
         if (a) {   // an address: what the memory and the pool table hold now
-            MEMORY_BASIC_INFORMATION mi = {0};
-            VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi);
             vkb_rw_read(&g_pool_mu, LK_POOLS);
             const pool_ent *p = pool_find((uintptr_t)a, 1);
+#ifdef _WIN32
+            MEMORY_BASIC_INFORMATION mi = {0};
+            VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi);
             VLOG("    memory %#llx: state %#lx protect %#lx region %p+%#llx; pool %s %#llx..%#llx", a, mi.State, mi.Protect, mi.BaseAddress,
                  (unsigned long long)mi.RegionSize, p ? "registered" : "none", p ? (unsigned long long)p->lo : 0ull, p ? (unsigned long long)p->hi : 0ull);
+#else
+            VLOG("    memory %#llx: pool %s %#llx..%#llx", a, p ? "registered" : "none", p ? (unsigned long long)p->lo : 0ull,
+                 p ? (unsigned long long)p->hi : 0ull);
+#endif
             vkb_rw_read_end(&g_pool_mu);
         }
     }
@@ -1654,9 +1716,13 @@ static wpool_t g_wp[SLOTS][VKB_MAXREC + 1];
 int vkb_mt_on(void) {
     static int n = -1;
     if (n < 0) {
+#ifdef _WIN32
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         int cpus = (int)si.dwNumberOfProcessors;
+#else
+        int cpus = (int)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
         const char *e = getenv("TOTK_VK_RECORD_THREADS");
         n = e && *e ? atoi(e) : cpus >= 8 ? 4 : cpus >= 4 ? 2 : 1;
         if (n > VKB_MAXREC) n = VKB_MAXREC;

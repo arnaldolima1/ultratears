@@ -29,6 +29,11 @@
 #include <sys/stat.h>
 #include <zstd.h>
 
+#ifndef _WIN32   // 64-bit offsets: off_t is 64-bit on macOS and Linux (with _FILE_OFFSET_BITS=64)
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
+#endif
+
 #include "../../src/gfx/tex/astc.h"
 #include "../../src/gfx/tex/bc7.h"
 #include "../../src/gfx/tex/bc7key.h"

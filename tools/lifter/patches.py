@@ -37,10 +37,28 @@ DECL = 'extern int totk_fps60(void); extern volatile float totk_step[3]; '
 
 
 def lifted(gen, addr, word):
+    """The instruction `word` as the lifter emits it at addr: C (--simd=c) or an inline-asm block (--simd=asm, ARM64
+    hosts: FP/SIMD runs natively on c->v, loaded and stored around the block)."""
     ins = gen.lifter.lift(word, addr)
+    if ins.kind == 'asm':
+        from lifter import emit_asm_batch
+        return emit_asm_batch([ins.asm])
     if ins.kind != 'op':
         raise SystemExit(f'patch at {addr:#x}: {word:#010x} does not lift to plain C ({ins.kind})')
     return ins.code
+
+
+def fmul_s(d, n, m):
+    """fmul s<d>, s<n>, s<m>, lifted like the game's own (either SIMD mode): (gen, addr) -> code."""
+    return lambda gen, addr: lifted(gen, addr, 0x1e200800 | m << 16 | n << 5 | d)
+
+
+def code(*parts):
+    """on_code from C strings and (gen, addr) -> code pieces."""
+    return lambda gen, addr: ' '.join(p(gen, addr) if callable(p) else p for p in parts)
+
+
+S32 = '(uint32_t)c->v[{r}]'   # s<r> as its 32 bits
 
 
 def fps60_swap(new):
@@ -57,9 +75,10 @@ def guarded(word, what, on_code, keep=False):
     def patch(gen, addr):
         expect(gen, addr, word, what)
         orig = lifted(gen, addr, word)
+        on = on_code(gen, addr) if callable(on_code) else on_code
         if keep:
-            return f'{{ {DECL}if ({ON}) {{ {on_code} }} {orig} }}'
-        return f'{{ {DECL}if ({ON}) {{ {on_code} }} else {{ {orig} }} }}'
+            return f'{{ {DECL}if ({ON}) {{ {on} }} {orig} }}'
+        return f'{{ {DECL}if ({ON}) {{ {on} }} else {{ {orig} }} }}'
     return patch
 
 
@@ -90,22 +109,22 @@ FPS60 = {
     0x3e5658: guarded(0x1e210808, 'realtime interval', SET_S.format(r=0, v=interval), keep=True),
     # Cloth / hair: the actor animation's second clock built {factor / 30, factor} per rendered frame.
     0x246eac: guarded(0x1e200940, 'cloth clock 1',
-                      SET_S.format(r=0, v=ratio) + ' fp_op_s(c, FOP_MUL, 0, 10, 0); ST32(c->sp + 0x364ull, VS32(0)); ' +
-                      SET_S.format(r=0, v=seconds) + ' fp_op_s(c, FOP_MUL, 0, 10, 0);'),
+                      code(SET_S.format(r=0, v=ratio), fmul_s(0, 10, 0), f'ST32(c->sp + 0x364ull, {S32.format(r=0)});',
+                           SET_S.format(r=0, v=seconds), fmul_s(0, 10, 0))),
     0x345904: guarded(0x1e210801, 'cloth clock 2',
-                      SET_S.format(r=1, v=ratio) + ' fp_op_s(c, FOP_MUL, 1, 0, 1); ST32(c->sp + 0x114ull, VS32(1)); ' +
-                      SET_S.format(r=1, v=seconds) + ' fp_op_s(c, FOP_MUL, 1, 0, 1);'),
+                      code(SET_S.format(r=1, v=ratio), fmul_s(1, 0, 1), f'ST32(c->sp + 0x114ull, {S32.format(r=1)});',
+                           SET_S.format(r=1, v=seconds), fmul_s(1, 0, 1))),
     # ... and the two callers of the out-of-line update at main+0x2a0e40 (s2 / s3 scaled before the bl that follows;
     # its third caller already passes measured time)
     0x249448: guarded(0x2a1403e6, 'cloth call 1',
-                      SET_S.format(r=4, v=ratio) + ' fp_op_s(c, FOP_MUL, 2, 2, 4); fp_op_s(c, FOP_MUL, 3, 3, 4);', keep=True),
+                      code(SET_S.format(r=4, v=ratio), fmul_s(2, 2, 4), fmul_s(3, 3, 4)), keep=True),
     0x28bc94: guarded(0x2a1a03e6, 'cloth call 2',
-                      SET_S.format(r=4, v=ratio) + ' fp_op_s(c, FOP_MUL, 2, 2, 4); fp_op_s(c, FOP_MUL, 3, 3, 4);', keep=True),
+                      code(SET_S.format(r=4, v=ratio), fmul_s(2, 2, 4), fmul_s(3, 3, 4)), keep=True),
     # Trampolines: the bounce is cut to 0.1 when the time object's FPS (X+0x28) > 100, meant as "time slowed below
     # 0.3"; compare FPS * ratio (= 30 / time scale) instead, independent of the frame rate.
     0x562a64: guarded(0xbd402920, 'bounce check',
-                      '{ uint64_t x_ = c->x[9]; c->v[0] = LD32(x_ + 0x28ull); c->v[1] = LD32(x_ + 0x38ull); '
-                      'fp_op_s(c, FOP_MUL, 0, 0, 1); }'),
+                      code('{ uint64_t x_ = c->x[9]; c->v[0] = LD32(x_ + 0x28ull); c->v[1] = LD32(x_ + 0x38ull); }',
+                           fmul_s(0, 0, 1))),
 }
 
 

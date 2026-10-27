@@ -11,6 +11,7 @@
 // TOTK_START_HIDDEN=1: the window stays hidden until the first game frame is shown, so its own window can stay up
 // (a loading screen) until then.
 #include <SDL3/SDL.h>
+#include <unistd.h>
 #define SDL_MAIN_HANDLED   // main() is boot.c's; SDL only gets SDL_SetMainReady
 #include <SDL3/SDL_main.h>
 #include <stdatomic.h>
@@ -37,6 +38,34 @@ void totk_fps60_set(int on);
 static bool env_on(const char *name) {
     const char *e = getenv(name);
     return e && *e && strcmp(e, "0");
+}
+
+// Start-up screen (with TOTK_START_HIDDEN, i.e. from the launcher): startup.txt in the game folder says where the start
+// is - "starting", "shaders <done> <total>" while the shader list is made ahead (vkb_shader.c), "ready" once the window
+// shows - and the launcher's transition screen reads it. The window stays hidden while the list is made (at most
+// STARTUP_HOLD_S after the first frame): the first draws then find their shaders made instead of stalling.
+#define STARTUP_HOLD_S 180
+int vkb_prewarm_progress(uint64_t *done, uint64_t *total);   // gfx/vkb_shader.c
+static void startup_status(const char *text) {
+    FILE *f = fopen("startup.txt.tmp", "w");
+    if (!f) return;
+    fputs(text, f);
+    fclose(f);
+    rename("startup.txt.tmp", "startup.txt");
+}
+static bool startup_holding(void) {
+    static uint64_t first_frame, last_write;
+    uint64_t now = SDL_GetTicksNS(), done, total;
+    if (!first_frame) first_frame = now;
+    int left = vkb_prewarm_progress(&done, &total);
+    bool hold = left > 0 && now - first_frame < (uint64_t)STARTUP_HOLD_S * 1000000000ull;
+    if (hold && now - last_write > 250000000ull) {
+        char s[64];
+        snprintf(s, sizeof s, "shaders %llu %llu\n", (unsigned long long)done, (unsigned long long)total);
+        startup_status(s);
+        last_write = now;
+    }
+    return hold;
 }
 
 static int mac_key(SDL_Scancode s) {
@@ -107,12 +136,19 @@ int window_init(void) {
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");   // 10 ms device buffer at 48 kHz
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");        // the exe's icon resource (assets/icon.ico via build/ultratears.rc) for the window
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
+#ifdef __APPLE__
+    // (fork) dlopen does not look in Homebrew's lib folder: the Vulkan loader (which finds MoltenVK) by its path
+    if (!getenv("SDL_VULKAN_LIBRARY"))
+        for (const char *const *p = (const char *const[]){"/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib", NULL}; *p; p++)
+            if (access(*p, R_OK) == 0) { SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, *p); break; }
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         fprintf(stderr, "[totk] SDL: %s\n", SDL_GetError());
         return 0;
     }
     pad_lock = SDL_CreateMutex();
     hidden_until_frame = env_on("TOTK_START_HIDDEN");
+    if (hidden_until_frame) startup_status("starting\n");
     fps_overlay = env_on("TOTK_FPS_OVERLAY");
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (hidden_until_frame) flags |= SDL_WINDOW_HIDDEN;
@@ -311,8 +347,9 @@ _Noreturn void window_loop(void) {
                 }
             } while (SDL_PollEvent(&e));
         }
-        if (hidden_until_frame && vkp_game_shown()) {
+        if (hidden_until_frame && vkp_game_shown() && !startup_holding()) {
             hidden_until_frame = false;
+            startup_status("ready\n");
             SDL_ShowWindow(window);
             SDL_RaiseWindow(window);
         }

@@ -1,4 +1,5 @@
-"""Write build/build.ninja for the runtime + the generated game code, and run ninja (MSYS2 CLANG64 clang/ninja).
+"""Write build/build.ninja for the runtime + the generated game code, and run ninja (MSYS2 CLANG64 clang/ninja on
+Windows; fork: Apple clang and Homebrew's ninja and libraries on macOS, toolchain.py).
 
 usage: python tools/build_game.py [--generated data/generated] [--target probe_cpu] [-j N] [--cpus N]
 The ultratears target links UltraTears.exe in the game folder itself (its debug symbols: build/UltraTears.pdb).
@@ -13,10 +14,11 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
-from toolchain import CLANG64, env as tool_env  # noqa: E402
+import toolchain  # noqa: E402
+from toolchain import MAC, env as tool_env, run_limited  # noqa: E402
 import version  # noqa: E402
 
-RUNTIME = ['src/runtime/dispatch.c', 'src/runtime/loader.c', 'src/runtime/platform/windows.c']
+RUNTIME = ['src/runtime/dispatch.c', 'src/runtime/loader.c', 'src/runtime/platform/macos.c' if MAC else 'src/runtime/platform/windows.c']
 TARGETS = {'probe_cpu': ['src/probe/probe_cpu.c'],
            'ultratears': ['src/host/boot.c', 'src/host/guest.c', 'src/host/svc.c', 'src/host/threads.c', 'src/host/ipc.c',
                     'src/host/services_lm.c', 'src/host/overrides_oe.c',
@@ -27,7 +29,8 @@ TARGETS = {'probe_cpu': ['src/probe/probe_cpu.c'],
                     'src/host/audio_reverb.c', 'src/host/opus_codec.c', 'src/host/movie_host.c', 'src/host/hid_feedback.c',
                     'src/host/shared_font.c',
                     'src/host/window_sdl.c', 'src/vk/vk.c', 'src/vk/present.c', 'src/host/motion_fusion.c',
-                    'src/host/profiler.c', 'src/host/watch.c', 'src/host/frame_step.c', 'src/host/render_res.c']}
+                    *(['src/host/devtools_posix.c'] if MAC else ['src/host/profiler.c', 'src/host/watch.c']),
+                    'src/host/frame_step.c', 'src/host/render_res.c']}
 # The graphics front end (MacNativeGames' NVN layer) with its macOS stand-ins: own include paths, own rule
 GFX = ['src/gfx/nvn/hle_nvn.c', 'src/gfx/nvn/nvn_tex.c', 'src/gfx/nvn/totk_nvn_ext.c', 'src/gfx/nvn/nvn_registry.c',
        'src/gfx/nvn/nvn_thunks.gen.c', 'src/gfx/nvn/nvn_dirty_win.c', 'src/gfx/nvn/totk_timeline_win.c',
@@ -35,10 +38,14 @@ GFX = ['src/gfx/nvn/hle_nvn.c', 'src/gfx/nvn/nvn_tex.c', 'src/gfx/nvn/totk_nvn_e
        'src/gfx/front_win.c', 'src/gfx/nvn/totk_vpool_win.c', 'src/gfx/backend_vk.c', 'src/gfx/vkb_tex.c', 'src/gfx/vkb_shader.c', 'src/gfx/vkb_spv.c', 'src/gfx/vkb_audit.c', 'src/gfx/vkb_copy.c', 'src/gfx/vkb_desc.c', 'src/gfx/vkb_shadow.c', 'src/gfx/vkb_ucap.c',
        'src/gfx/vkb_draw.c', 'src/gfx/tex/nvn_deswizzle.c', 'src/gfx/tex/astc.c', 'src/gfx/vkb_bc7.c',
        'src/gfx/tex/bc7.cpp', 'src/gfx/tex/bc7enc/bc7enc.cpp', 'src/gfx/tex/bc7enc/rgbcx.cpp', 'src/gfx/tex/bc7key.c']
-GFX_INCLUDES = '-Isrc/gfx -Isrc/gfx/nvn -Isrc/gfx/nvn/include -Isrc/gfx/compat'
-LIBS = '-static -Wl,--subsystem,windows -Wl,--error-limit=0 -Wl,--disable-high-entropy-va -pthread -ldbghelp -lwinmm -lsynchronization -lshell32 -lopus -lvpx -lSDL3 -liconv' \
+# (macOS: the real Mach headers, not compat/'s Windows stand-ins)
+GFX_INCLUDES = '-Isrc/gfx -Isrc/gfx/nvn -Isrc/gfx/nvn/include' + ('' if MAC else ' -Isrc/gfx/compat')
+LIBS_WIN = '-static -Wl,--subsystem,windows -Wl,--error-limit=0 -Wl,--disable-high-entropy-va -pthread -ldbghelp -lwinmm -lsynchronization -lshell32 -lopus -lvpx -lSDL3 -liconv' \
        ' -luser32 -lgdi32 -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -ldinput8 -lbcrypt -lc++'
-CFLAGS = '-O2 -march=x86-64-v3 -g -gcodeview -fno-strict-aliasing -D_FILE_OFFSET_BITS=64'
+LIBS_MAC = f'-L{toolchain.HOMEBREW}/lib -lSDL3 -lopus -lvpx -liconv -lc++ -framework CoreFoundation'
+LIBS = LIBS_MAC if MAC else LIBS_WIN
+CFLAGS = (f'-O2 -mcpu=apple-m1 -g -fno-strict-aliasing -D_FILE_OFFSET_BITS=64 -I{toolchain.HOMEBREW}/include' if MAC else
+          '-O2 -march=x86-64-v3 -g -gcodeview -fno-strict-aliasing -D_FILE_OFFSET_BITS=64')
 GAME_CFLAGS = CFLAGS + ' -w -Isrc/runtime'
 
 
@@ -118,7 +125,8 @@ def main():
         'rule rc',
         '  command = llvm-windres --target=pe-x86-64 -I . $in -o $out',
         'rule link',
-        f'  command = clang -fuse-ld=lld -g -Wl,--pdb=$pdb -o $out @$out.rsp {LIBS}',
+        (f'  command = clang -g -o $out @$out.rsp {LIBS}' if MAC else
+         f'  command = clang -fuse-ld=lld -g -Wl,--pdb=$pdb -o $out @$out.rsp {LIBS}'),
         '  rspfile = $out.rsp',
         '  rspfile_content = $in',
         '',
@@ -131,8 +139,9 @@ def main():
     if a.target == 'ultratears':
         # the port's icon (assets/icon.ico, the author's own drawing: README.md, Legal) and version in the resources
         print(f'UltraTears {version_files(build)}', flush=True)
-        lines.append('build build/obj/ultratears_res.o: rc build/ultratears.rc | assets/icon.ico')
-        objs.append('build/obj/ultratears_res.o')
+        if not MAC:   # (macOS: no resources in the executable; the version is in build/version.h all the same)
+            lines.append('build build/obj/ultratears_res.o: rc build/ultratears.rc | assets/icon.ico')
+            objs.append('build/obj/ultratears_res.o')
         for src in GFX:
             cxx = src.endswith('.cpp')
             obj = f'build/obj/{src.rsplit(".", 1)[0].replace("/", "_")}.o'
@@ -140,7 +149,7 @@ def main():
             objs.append(obj)
     game_objs = []
     for module in ('main', 'subsdk0', 'sdk'):
-        for c in sorted((gen / module).glob('*.c')):
+        for c in sorted(c for c in (gen / module).glob('*.c') if not c.name.startswith('._')):   # (macOS metadata twins on exFAT)
             obj = f'build/game/{module}/{c.stem}.o'
             lines.append(f'build {obj}: gamecc {rel(c)}')
             text = c.read_text(errors='replace')
@@ -152,7 +161,7 @@ def main():
             game_objs.append(obj)
     if not game_objs:
         sys.exit(f'no generated C in {gen}: run tools/gen_game.py first')
-    exe = 'UltraTears.exe' if a.target == 'ultratears' else f'build/{a.target}.exe'   # the game: in the game folder
+    exe = f'UltraTears{toolchain.EXE}' if a.target == 'ultratears' else f'build/{a.target}{toolchain.EXE}'   # the game: in the game folder
     lines.append(f'build {exe}: link {" ".join(objs + game_objs)}')
     lines.append(f'  pdb = build/{pathlib.Path(exe).stem}.pdb')
     lines.append(f'default {exe}')
@@ -161,20 +170,8 @@ def main():
     print(f'{len(game_objs)} generated files, {len(objs)} runtime files', flush=True)
     # The user works on this PC during builds: ninja starts suspended, gets the first --cpus logical CPUs and
     # below-normal priority, then runs; every clang it starts inherits both, so the other CPUs stay free.
-    ninja = [str(CLANG64 / 'ninja.exe'), '-C', str(ROOT), '-f', 'build/build.ninja', f'-j{a.j}', '-k', '0']
-    sys.exit(run_limited(ninja, env, (1 << a.cpus) - 1))
-
-
-def run_limited(cmd, env, mask):
-    import ctypes
-    CREATE_SUSPENDED, BELOW_NORMAL_PRIORITY_CLASS = 0x4, 0x4000
-    p = subprocess.Popen(cmd, env=env, creationflags=CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS)
-    handle = int(p._handle)
-    if not ctypes.windll.kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask)):
-        p.kill()
-        sys.exit('SetProcessAffinityMask failed')
-    ctypes.windll.ntdll.NtResumeProcess(handle)
-    return p.wait()
+    ninja = [toolchain.NINJA, '-C', str(ROOT), '-f', 'build/build.ninja', f'-j{a.j}', '-k', '0']
+    sys.exit(run_limited(ninja, env, a.cpus))
 
 
 if __name__ == '__main__':

@@ -15,6 +15,8 @@ void hle_native_thunk(Cpu *c);
 #define HLE_CAT(a, b) HLE_CAT2(a, b)
 #if defined(__linux__)
 #define HLE_SECTION "hle_impls"  // ELF: the linker defines __start_ / __stop_ for C-identifier section names
+#elif defined(__APPLE__)
+#define HLE_SECTION "__DATA,__hle_impls"  // Mach-O: ld64 gives the section's bounds as section$start / section$end
 #else
 #define HLE_SECTION ".hle$m"  // PE/COFF: between the .hle$a / .hle$z markers in dispatch.c
 #endif

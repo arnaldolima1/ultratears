@@ -21,7 +21,12 @@
    on) and 6 GiB for stacks and the heap below it. */
 #define ALIAS_START   0x7000000000ULL
 #define ALIAS_SIZE    (64ULL << 30)
+#ifdef __APPLE__   /* (fork) macOS 26 keeps 0x10_0000_0000..0x70_0000_0000 for itself: platform/macos.c picks the place */
+extern uint64_t plat_guest_low;
+#define LOW_START     plat_guest_low
+#else
 #define LOW_START     0x1000000000ULL
+#endif
 #define LOW_SIZE      (6ULL << 30)
 #define STACK_OFF     0x10000000ULL
 #define STACK_SIZE    0x10000000ULL

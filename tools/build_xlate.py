@@ -21,19 +21,21 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dotnet', default='dotnet')
+    ap.add_argument('--rid', default='osx-arm64' if sys.platform == 'darwin' else 'win-x64',
+                    help='.NET runtime to publish for (default: this computer\'s)')
     a = ap.parse_args()
     out = ROOT / 'dev-local/build/shaders'   # a development tool's build: no game data, not in git
     env = dict(os.environ, NUGET_PACKAGES=str(ROOT / 'dev-local/nuget'), DOTNET_CLI_HOME=str(ROOT / 'dev-local/dotnet-home'),
                DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1', DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1')
     proj = ROOT / 'third_party/shader_translator/ultrs-shaders.csproj'
-    rc = subprocess.run([a.dotnet, 'publish', str(proj), '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+    rc = subprocess.run([a.dotnet, 'publish', str(proj), '-c', 'Release', '-r', a.rid, '--self-contained', 'true',
                          '-p:PublishSingleFile=true', '-p:InvariantGlobalization=true',
                          '-p:IncludeNativeLibrariesForSelfExtract=true',
                          f'-p:RyuSrc={ROOT / "third_party/maxwell_shader"}',
                          '-o', str(out), '-nologo', '-v:q', '-maxcpucount:4'], env=env).returncode
     if rc:
         sys.exit(rc)
-    exe = out / 'ultrs-shaders.exe'
+    exe = out / ('ultrs-shaders.exe' if a.rid.startswith('win') else 'ultrs-shaders')
     for f in out.iterdir():   # one program; the debug symbols are not needed
         if f.suffix == '.pdb':
             f.unlink()

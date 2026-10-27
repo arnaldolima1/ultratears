@@ -9,7 +9,11 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>
+#else   // (fork: macOS) the same reservations with mmap
+#include <sys/mman.h>
+#endif
 
 #include "../host/hle.h"
 #include "nvn_dirty.h"
@@ -42,9 +46,19 @@ int totk_vpool_init(pool_t *o) {
     if (phys && !(o->flags & F_CPU_NO_ACCESS)) return 1;   // the game storage itself
     o->span = o->size;
     if (phys) {   // CPU_NO_ACCESS: our own storage
+#ifdef _WIN32
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+        o->host = mmap(NULL, o->span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (o->host == MAP_FAILED) o->host = NULL;
+#endif
     } else {      // virtual: addresses only
+#ifdef _WIN32
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE, PAGE_NOACCESS);
+#else
+        o->host = mmap(NULL, o->span, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (o->host == MAP_FAILED) o->host = NULL;
+#endif
         vtable *t = calloc(1, sizeof *t);
         if (!t) die("vpool: table allocation");
         t->pool = o; t->npages = o->size / TOTK_VPOOL_PAGE;
@@ -52,7 +66,11 @@ int totk_vpool_init(pool_t *o) {
         if (!t->pages) die("vpool: page table allocation");
         pthread_mutex_lock(&g_map_mu); t->next = g_tables; g_tables = t; pthread_mutex_unlock(&g_map_mu);
     }
+#ifdef _WIN32
     if (!o->host) { LOG("vpool: VirtualAlloc(%#llx) failed (%lu)", (unsigned long long)o->span, GetLastError()); return 0; }
+#else
+    if (!o->host) { LOG("vpool: mmap(%#llx) failed", (unsigned long long)o->span); return 0; }
+#endif
     o->mem = o->host;
     return 1;
 }
@@ -63,7 +81,11 @@ int totk_vpool_fini(pool_t *o) {
     for (vtable **p = &g_tables; *p; p = &(*p)->next)
         if ((*p)->pool == o) { vtable *t = *p; *p = t->next; free(t->pages); free(t); break; }
     pthread_mutex_unlock(&g_map_mu);
+#ifdef _WIN32
     VirtualFree(o->host, 0, MEM_RELEASE);
+#else
+    munmap(o->host, o->span);
+#endif
     o->host = NULL; o->mem = o->game_mem; o->span = 0;
     return 1;
 }

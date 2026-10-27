@@ -4,12 +4,16 @@ usage: python tools/gen_game.py <exefs dir> <output dir>
 Bases must match src/runtime/rt.h (MAIN_BASE, SUBSDK0_BASE, SDK_BASE).
 """
 import pathlib
+import platform
 import subprocess
 import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODULES = {'main': 0x0800000000, 'subsdk0': 0x0804000000, 'sdk': 0x0805000000}
+# FP/SIMD: native AArch64 inline asm on an ARM64 host (macOS on Apple silicon: bit-exact, MacNativeGames' way), the
+# portable C lowering (runtime/simd.h) on x86-64
+SIMD = 'asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c'
 
 
 def main():
@@ -18,10 +22,12 @@ def main():
     procs = []
     for name, base in MODULES.items():
         (out / name).mkdir(parents=True, exist_ok=True)
+        for old in (out / name).glob('*.c'):   # a new lift writes every file again: none of the last one may stay
+            old.unlink(missing_ok=True)   # (macOS on exFAT: a ._ twin goes with its file)
         log = open(out / f'{name}.log', 'w')
         procs.append((name, log, subprocess.Popen(
             [sys.executable, str(ROOT / 'tools/lifter/gen.py'), name, str(exefs / name), hex(base), str(out / name),
-             '--simd', 'c'], stdout=log, stderr=subprocess.STDOUT)))
+             '--simd', SIMD], stdout=log, stderr=subprocess.STDOUT)))
     failed = False
     for name, log, p in procs:
         code = p.wait()

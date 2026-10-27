@@ -1,5 +1,7 @@
 // Glue between host threads and the recompiled game: per-thread Cpu, Horizon TLS blocks, host -> guest calls, SVCs.
+#ifdef _WIN32
 #include <malloc.h>
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>

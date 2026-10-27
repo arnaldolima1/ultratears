@@ -10,8 +10,12 @@
 //    own layout): +0 Ryujinx support buffer, +1..17 constant buffers c0-c16, +18..33 storage buffers, +34..57 combined
 //    textures, +58..61 images. The translator numbers bindings densely per shader; they are rewritten in the SPIR-V
 //    when it is loaded, so any vertex shader combines with any fragment shader under one pipeline layout.
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>   // after windows.h (its types)
+#else
+#include <CommonCrypto/CommonDigest.h>
+#endif
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +116,7 @@ static shentry *g_tab[4096];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_loaded, g_missing;
 
+#ifdef _WIN32
 static BCRYPT_ALG_HANDLE g_sha;   // opened once (opening it per hash cost more than the hash)
 static void sha_open(void) { if (BCryptOpenAlgorithmProvider(&g_sha, BCRYPT_SHA256_ALGORITHM, NULL, 0)) die("SHA-256 provider"); }
 static void sha256_hex(const void *a, size_t na, const void *b, size_t nb, char out[65]) {
@@ -125,6 +130,15 @@ static void sha256_hex(const void *a, size_t na, const void *b, size_t nb, char 
     BCryptHashData(h, (PUCHAR)b, (ULONG)nb, 0);
     BCryptFinishHash(h, md, sizeof md, 0);
     BCryptDestroyHash(h);
+#else
+static void sha256_hex(const void *a, size_t na, const void *b, size_t nb, char out[65]) {   // (fork: macOS)
+    CC_SHA256_CTX h;
+    uint8_t md[32];
+    CC_SHA256_Init(&h);
+    CC_SHA256_Update(&h, a, (CC_LONG)na);
+    CC_SHA256_Update(&h, b, (CC_LONG)nb);
+    CC_SHA256_Final(md, &h);
+#endif
     static const char hex[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) { out[2 * i] = hex[md[i] >> 4]; out[2 * i + 1] = hex[md[i] & 15]; }
     out[64] = 0;
@@ -134,6 +148,111 @@ static const char *cache_dir(void) {
     static const char *d;
     if (!d) { d = getenv("TOTK_SHADER_DIR"); if (!d) d = "data/shaders/ryujinx"; }
     return d;
+}
+
+// ---------------- the shader pack (<cache>/shaders.pack, tools/pack_shaders.py) ----------------
+// One file instead of a .spv and a .res.json per shader (~57,000 files: slow to copy, back up and sync). Layout,
+// little-endian: "UTSHPK01", u32 count, u32 0, then count entries sorted by key {u8 key[32] (the SHA-256); u64 offset;
+// u32 SPIR-V bytes; u32 reflection bytes} (the SPIR-V at offset, its reflection right after it), then the data.
+// Without a pack, or for a key not in it, the loose files are read as before.
+typedef struct { uint8_t key[32]; uint64_t off; uint32_t nspv, njson; } pack_entry;
+_Static_assert(sizeof(pack_entry) == 48, "shader pack entry layout");
+#ifdef _WIN32
+typedef HANDLE pack_fd;
+#define PACK_NONE INVALID_HANDLE_VALUE
+#else   // (fork: macOS) a file descriptor and pread
+#include <fcntl.h>
+#include <unistd.h>
+typedef int pack_fd;
+#define PACK_NONE (-1)
+#endif
+static pack_fd g_pack = PACK_NONE;
+static pack_entry *g_pack_ix;
+static uint32_t g_pack_n;
+static int read_at(pack_fd h, uint64_t off, void *buf, uint32_t n) {   // positioned read: safe from several threads
+#ifdef _WIN32
+    OVERLAPPED o = {0};
+    o.Offset = (DWORD)off;
+    o.OffsetHigh = (DWORD)(off >> 32);
+    DWORD got = 0;
+    return ReadFile(h, buf, n, &got, &o) && got == n;
+#else
+    for (uint32_t done = 0; done < n;) {
+        ssize_t r = pread(h, (char *)buf + done, n - done, (off_t)(off + done));
+        if (r <= 0) return 0;
+        done += (uint32_t)r;
+    }
+    return 1;
+#endif
+}
+static void pack_open(void) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/shaders.pack", cache_dir());
+#ifdef _WIN32
+    pack_fd h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+#else
+    pack_fd h = open(path, O_RDONLY);
+#endif
+    if (h == PACK_NONE) return;
+    uint8_t hd[16];
+    uint32_t n = 0;
+    if (read_at(h, 0, hd, sizeof hd) && !memcmp(hd, "UTSHPK01", 8)) memcpy(&n, hd + 8, 4);
+    pack_entry *ix = n && n < (1u << 24) ? malloc((size_t)n * sizeof *ix) : NULL;
+    if (!ix || !read_at(h, sizeof hd, ix, n * (uint32_t)sizeof *ix)) {
+        VLOG("%s: not a shader pack, the loose files are used", path);
+        free(ix);
+#ifdef _WIN32
+        CloseHandle(h);
+#else
+        close(h);
+#endif
+        return;
+    }
+    g_pack = h;
+    g_pack_ix = ix;
+    g_pack_n = n;
+    VLOG("shader pack: %u shaders in %s", n, path);
+}
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static int pack_read(const char *key, char **json, uint32_t **spv, size_t *nspv) {
+    uint8_t k[32];
+    for (int i = 0; i < 32; i++) {
+        int hi = hexval(key[2 * i]), lo = hi < 0 ? -1 : hexval(key[2 * i + 1]);
+        if (lo < 0) return 0;
+        k[i] = (uint8_t)(hi << 4 | lo);
+    }
+    size_t lo = 0, hi = g_pack_n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = memcmp(g_pack_ix[mid].key, k, 32);
+        if (c < 0) { lo = mid + 1; continue; }
+        if (c > 0) { hi = mid; continue; }
+        const pack_entry *e = &g_pack_ix[mid];
+        char *s = malloc((size_t)e->nspv + 1), *j = malloc((size_t)e->njson + 1);
+        if (!s || !j || !read_at(g_pack, e->off, s, e->nspv) || !read_at(g_pack, e->off + e->nspv, j, e->njson)) {
+            free(s);
+            free(j);
+            return 0;
+        }
+        s[e->nspv] = 0;
+        j[e->njson] = 0;
+        *spv = (uint32_t *)s;
+        *json = j;
+        *nspv = e->nspv;
+        return 1;
+    }
+    return 0;
+}
+// A shader's translation (SPIR-V) and reflection (JSON), malloc'd and NUL-terminated: from the pack, else the loose files.
+static void read_translation(const char *key, char **json, uint32_t **spv, size_t *nspv) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, pack_open);
+    if (g_pack_n && strlen(key) >= 64 && pack_read(key, json, spv, nspv)) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
+    *json = read_file(path, NULL);
+    snprintf(path, sizeof path, "%s/%s.spv", cache_dir(), key);
+    *spv = (uint32_t *)read_file(path, nspv);
 }
 
 // The translator declares gl_PerVertex with ClipDistance[8] and CullDistance[1]: 9 > maxCombinedClipAndCullDistances (8)
@@ -248,12 +367,10 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t 
 
 // Reads the reflection, rewrites the SPIR-V bindings into the universal layout, creates the shader object.
 static int load(vkb_shader *s, const char *key, int nvn_stage) {
-    char path[1024];
-    snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
-    char *j = read_file(path, NULL);
-    snprintf(path, sizeof path, "%s/%s.spv", cache_dir(), key);
+    char *j = NULL;
+    uint32_t *spv = NULL;
     size_t nspv = 0;
-    uint32_t *spv = (uint32_t *)read_file(path, &nspv);
+    read_translation(key, &j, &spv, &nspv);
     if (!j || !spv || nspv < 20 || (nspv & 3) || spv[0] != 0x07230203) { free(j); free(spv); return 0; }
     s->stage = nvn_stage;
     uint32_t base = nvn_stage == 1 ? VKB_STAGE_BINDINGS : 0;
@@ -356,8 +473,16 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
 // PREWARM_THREADS low-priority threads create the listed ones that are not loaded yet. The first run fills the list;
 // later runs find those shaders made (as SavageWind's pipeline list). The constants c1 come from the game's program
 // at the first real lookup (c1_set).
-enum { PREWARM_THREADS = 2 };
+// Progress for the start-up screen (window_sdl.c: the window stays hidden while the list is made, the launcher shows
+// "compiling shaders n / total"): with the game waiting for it, half the CPUs make the list instead of two threads.
 static uint64_t g_prewarm_made, g_prewarm_hits;
+static _Atomic uint64_t g_prewarm_total, g_prewarm_done;
+static _Atomic int g_prewarm_left = -1;   // threads still making the list; -1 not started (no list yet / not looked up)
+int vkb_prewarm_progress(uint64_t *done, uint64_t *total) {
+    *done = atomic_load(&g_prewarm_done);
+    *total = atomic_load(&g_prewarm_total);
+    return atomic_load(&g_prewarm_left);
+}
 uint64_t vkb_shader_load_ns;   // shaders made when first drawn with (long submission log, backend_vk.c)
 static char *g_list;   // used.txt, read once
 static size_t g_list_n;
@@ -373,10 +498,15 @@ static void list_add(const char *key, int stage) {   // g_mu held
 static void *prewarm_thread(void *unused) {
     (void)unused;
     pthread_setname_np("totk-shader-prewarm");
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#else
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
     for (;;) {
         size_t at = atomic_fetch_add(&g_list_at, 67);   // one line: 64 hex digits, space, stage, newline (67 bytes)
         if (at + 67 > g_list_n) break;
+        atomic_fetch_add(&g_prewarm_done, 1);
         const char *l = g_list + at;
         if (l[64] != ' ' || l[66] != '\n') continue;
         char key[65];
@@ -401,22 +531,33 @@ static void *prewarm_thread(void *unused) {
         pthread_mutex_unlock(&g_mu);
         if (e) { vk.vkDestroyShaderEXT(vkc.device, n->sh.obj, NULL); free(n->sh.spv); free(n); }   // loaded meanwhile
     }
-    static _Atomic int left = PREWARM_THREADS;
-    if (atomic_fetch_sub(&left, 1) == 1) VLOG("shaders made ahead from the list: %llu", (unsigned long long)g_prewarm_made);
+    if (atomic_fetch_sub(&g_prewarm_left, 1) == 1) VLOG("shaders made ahead from the list: %llu", (unsigned long long)g_prewarm_made);
     return NULL;
 }
 static void prewarm_start(void) {
     const char *e = getenv("TOTK_SHADER_PREWARM");   // =0: shaders are made only when first drawn with (A/B)
-    if (e && *e == '0') return;
+    if (e && *e == '0') { atomic_store(&g_prewarm_left, 0); return; }
     char path[1024];
     snprintf(path, sizeof path, "%s/used.txt", cache_dir());
     size_t n = 0;
-    if (!(g_list = read_file(path, &n))) return;
+    if (!(g_list = read_file(path, &n))) { atomic_store(&g_prewarm_left, 0); return; }
     g_list_n = n;
-    VLOG("shader list: %zu shaders to make ahead", n / 67);
-    for (int i = 0; i < PREWARM_THREADS; i++) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int threads = (int)si.dwNumberOfProcessors / 2;
+#else
+    int threads = (int)sysconf(_SC_NPROCESSORS_ONLN) / 2;
+#endif
+    if (threads < 2) threads = 2;
+    if (threads > 8) threads = 8;
+    VLOG("shader list: %zu shaders to make ahead (%d threads)", n / 67, threads);
+    atomic_store(&g_prewarm_total, n / 67);
+    atomic_store(&g_prewarm_left, threads);
+    for (int i = 0; i < threads; i++) {
         pthread_t t;
         if (pthread_create(&t, NULL, prewarm_thread, NULL) == 0) pthread_detach(t);
+        else atomic_fetch_sub(&g_prewarm_left, 1);
     }
 }
 

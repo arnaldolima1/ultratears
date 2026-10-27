@@ -4,7 +4,11 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <pthread.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,8 +42,14 @@ static int create_instance(SDL_Window *window) {
     PFN_vkGetInstanceProcAddr gipa = NULL;
     if (window) gipa = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
     else {   // no window (TOTK_HEADLESS): SDL's video subsystem is not up, so the loader is loaded here
+#ifdef _WIN32
         HMODULE m = LoadLibraryA("vulkan-1.dll");
         if (m) gipa = (PFN_vkGetInstanceProcAddr)(void *)GetProcAddress(m, "vkGetInstanceProcAddr");
+#else   // (fork: macOS) the Vulkan loader, with MoltenVK as its driver
+        void *m = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+        if (!m) m = dlopen("/opt/homebrew/lib/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);   // (Homebrew: not on the search path)
+        if (m) gipa = (PFN_vkGetInstanceProcAddr)dlsym(m, "vkGetInstanceProcAddr");
+#endif
     }
     if (!gipa) { LOG("no Vulkan loader (vulkan-1.dll)"); return 0; }
 #define LOAD(f) vk.f = (PFN_##f)gipa(NULL, #f);
@@ -57,6 +67,31 @@ static int create_instance(SDL_Window *window) {
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = next, .ppEnabledExtensionNames = exts,
                                .enabledLayerCount = validate ? 1u : 0u, .ppEnabledLayerNames = &layer};
+#ifdef __APPLE__
+    // (fork) MoltenVK has no VK_EXT_shader_object: Khronos' shader object layer provides it over pipelines.
+    // tools/setup.py writes its manifest (with the library's full path) to deps/vulkan/explicit_layer.d.
+    const char *layers[2];
+    uint32_t nl = 0;
+    if (validate) layers[nl++] = layer;
+    char lpath[1200];
+    if (!getenv("VK_ADD_LAYER_PATH") && realpath("deps/vulkan/explicit_layer.d", lpath)) setenv("VK_ADD_LAYER_PATH", lpath, 1);
+    const char *so_layer = "VK_LAYER_KHRONOS_shader_object";
+    if (has_layer(so_layer)) layers[nl++] = so_layer;
+    else LOG("%s not found (deps/vulkan/explicit_layer.d; brew install vulkan-extensionlayer): no shader objects", so_layer);
+    ci.enabledLayerCount = nl;
+    ci.ppEnabledLayerNames = layers;
+#endif
+#ifdef __APPLE__
+    // (fork) MoltenVK is a "portability" driver: the loader lists it only when the instance asks for those
+    const char *with_portability[64];
+    uint32_t np = 0;
+    for (uint32_t i = 0; i < next && np < 62; i++) with_portability[np++] = exts[i];
+    with_portability[np++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    with_portability[np++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+    ci.enabledExtensionCount = np;
+    ci.ppEnabledExtensionNames = with_portability;
+    ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     if (!vk_check(vk.vkCreateInstance(&ci, NULL, &vkc.instance), "vkCreateInstance")) return 0;
 #define LOAD(f) vk.f = (PFN_##f)gipa(vkc.instance, #f);
     VK_FN_INSTANCE(LOAD)
@@ -184,6 +219,10 @@ static int create_device(void) {
         {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME, &flr, &has_lr},
         // development (TOTK_VK_CHECKPOINTS=1): the markers a lost device reached
         {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, NULL, &vkc.has_checkpoints},
+#ifdef __APPLE__
+        // (fork) a portability driver (MoltenVK) must have this one enabled
+        {"VK_KHR_portability_subset", NULL, NULL},
+#endif
     };
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) {
         if (!strcmp(want[i].name, VK_KHR_SWAPCHAIN_EXTENSION_NAME) && !vkc.surface) continue;

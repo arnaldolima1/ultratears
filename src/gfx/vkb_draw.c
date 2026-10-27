@@ -1066,7 +1066,13 @@ static void set_dynamic_state(VkCommandBuffer cb, int ncolor, VkExtent2D ext, Vk
     if (dyn(D_SC, sc, sizeof sc[0] * (size_t)nvp)) vk.vkCmdSetScissorWithCount(cb, (uint32_t)nvp, sc);
     DYN(D_RDISC, VkBool32, S.raster_discard != 0, vk.vkCmdSetRasterizerDiscardEnable(cb, v_));
     DYN(D_TOPO, VkPrimitiveTopology, topo, vk.vkCmdSetPrimitiveTopology(cb, v_));
+#ifdef __APPLE__
+    // (fork) Metal cannot turn primitive restart off: MoltenVK fails every pipeline asked for that (nothing drawn, and the
+    // shader object layer then binds the failed pipeline). Metal restarts strips only, at the all-ones index.
+    DYN(D_RESTART, VkBool32, VK_TRUE, vk.vkCmdSetPrimitiveRestartEnable(cb, v_));
+#else
     DYN(D_RESTART, VkBool32, VK_FALSE, vk.vkCmdSetPrimitiveRestartEnable(cb, v_));   // [temporary] NVN primitive restart state is not recorded yet
+#endif
     // polygon state
     uint32_t cull = S.has_poly ? S.poly.cull : 0, front = S.has_poly ? S.poly.front : 1, mode = S.has_poly ? S.poly.mode : 2;
     DYN(D_CULL, VkCullModeFlags, (VkCullModeFlags)cull, vk.vkCmdSetCullMode(cb, v_));

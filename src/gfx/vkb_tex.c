@@ -7,7 +7,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <direct.h>
+#else
+#include <sys/stat.h>
+#define _mkdir(p) mkdir((p), 0755)
+#endif
 
 #include "compat/gfx_compat.h"
 #include "host/hle.h"

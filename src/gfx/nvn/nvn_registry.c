@@ -5,15 +5,25 @@
 #include "../host/hle.h"
 #include "nvn_impl.h"
 
+#ifdef __APPLE__
+// Mach-O (fork): ld64 gives each section's bounds; the entries start right at section$start.
+extern const nvn_impl impls_start[] __asm("section$start$__DATA$__nvn_impls");
+extern const nvn_impl impls_stop[] __asm("section$end$__DATA$__nvn_impls");
+extern const nvn_impl extras_start[] __asm("section$start$__DATA$__nvn_extras");
+extern const nvn_impl extras_stop[] __asm("section$end$__DATA$__nvn_extras");
+#define FIRST_ENTRY 0
+#else
 // The linker sorts .nvni$a < .nvni$m (NVN / NVN_NOPROTO entries) < .nvni$z by the text after '$'; likewise .nvnx.
 __attribute__((section(".nvni$a"), used)) static const nvn_impl impls_start[1];
 __attribute__((section(".nvni$z"), used)) static const nvn_impl impls_stop[1];
 __attribute__((section(".nvnx$a"), used)) static const nvn_impl extras_start[1];
 __attribute__((section(".nvnx$z"), used)) static const nvn_impl extras_stop[1];
+#define FIRST_ENTRY 1   // (after the start marker)
+#endif
 
 static const nvn_impl *range(const nvn_impl *a, const nvn_impl *b, unsigned *n) {
     __asm__("" : "+r"(a), "+r"(b));   // separate objects: keep the compiler from reasoning about them
-    const nvn_impl *first = a + 1;
+    const nvn_impl *first = a + FIRST_ENTRY;
     while (first < b && !first->name) first++;   // (section padding)
     *n = (unsigned)(b - first);
     return first;

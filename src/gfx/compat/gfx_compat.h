@@ -7,6 +7,30 @@
 // - sigsetjmp guards: plain setjmp (guest pages are committed on first touch, so guarded guest reads do not fault).
 // - malloc_size: _msize.
 #pragma once
+#ifdef __APPLE__
+// (fork) On macOS, MacNativeGames' graphics front end has the real APIs: no stand-ins
+#include <TargetConditionals.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/mach_vm.h>
+#include <mach/thread_policy.h>
+#include <malloc/malloc.h>
+#include <pthread.h>
+#include <pthread/qos.h>
+#include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <time.h>
+#include <unistd.h>
+uint64_t plat_now_ns(void);
+void plat_sleep_until_ns(uint64_t t);
+#else
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -112,3 +136,5 @@ static inline uint64_t clock_gettime_nsec_np(clockid_t clk) {
     if (clock_gettime(clk, &ts)) return 0;
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+#endif   // __APPLE__

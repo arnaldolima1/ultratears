@@ -1,5 +1,5 @@
 // Host OS layer: everything the runtime needs that differs between macOS and Windows.
-// Implementations: runtime/platform/macos.c, runtime/platform/windows.c (the Makefile picks one).
+// Implementations: runtime/platform/macos.c, windows.c, linux.c (tools/build_game.py picks one).
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,6 +9,8 @@
 #include "platform/win_compat.h"
 #elif defined(__linux__)
 #include "platform/linux_compat.h"
+#elif defined(__APPLE__)
+#include "platform/mac_compat.h"
 #endif
 
 #ifdef __cplusplus

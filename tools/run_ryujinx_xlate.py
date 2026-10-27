@@ -4,7 +4,6 @@ usage: python tools/run_ryujinx_xlate.py data/shaders [--workers 8]
 Writes <dir>/ryujinx/<key>.spv and <dir>/ryujinx-results.tsv (key, ok/fail, seconds, spv bytes, message).
 """
 import argparse
-import ctypes
 import json
 import os
 import pathlib
@@ -15,16 +14,11 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
-from toolchain import XLATE  # noqa: E402
+from toolchain import XLATE, popen_limited  # noqa: E402
 
 
-def start_pinned(cmd, mask, env):
-    CREATE_SUSPENDED, BELOW_NORMAL = 0x4, 0x4000
-    p = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         text=True, creationflags=CREATE_SUSPENDED | BELOW_NORMAL)
-    ctypes.windll.kernel32.SetProcessAffinityMask(int(p._handle), ctypes.c_size_t(mask))
-    ctypes.windll.ntdll.NtResumeProcess(int(p._handle))
-    return p
+def start_pinned(cmd, cpus, env):
+    return popen_limited(cmd, env, cpus, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
 
 def main():
@@ -41,14 +35,14 @@ def main():
     env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1',
                DOTNET_CLI_HOME=str(ROOT / 'third_party/dotnet-home'))
     if XLATE is None:
-        sys.exit('the shader translator ultrs-shaders.exe is missing: python tools/build_xlate.py')
+        sys.exit('the shader translator ultrs-shaders is missing: python tools/build_xlate.py')
     cmd = [str(XLATE)]   # tools/build_xlate.py, or the builder package's deps/shaders
     results, lock = [], threading.Lock()
     shards = [lines[i::a.workers] for i in range(a.workers)]
     t0 = time.time()
 
     def worker(shard):
-        p = start_pinned(cmd + ['--serve'], (1 << a.workers) - 1, env)
+        p = start_pinned(cmd + ['--serve'], a.workers, env)
         for line in shard:
             key = json.loads(line)['job']['key']
             s = time.perf_counter()

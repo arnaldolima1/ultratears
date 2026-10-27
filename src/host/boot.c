@@ -90,6 +90,29 @@ static const char *default_exefs(void) {
         fprintf(stderr, "[totk] game folder %s (%s)\n", path, cfg);
     } else
         fprintf(stderr, "[totk] game folder %s (no ultratears.cfg: setup.py's layout)\n", path);
+#else   // (fork: macOS, Linux; as upstream PR #15) the same, from the executable's own path
+    char path[4096];
+    char *slash = plat_exe_path(path, sizeof path) ? strrchr(path, '/') : NULL;
+    if (!slash) return exefs;
+    *slash = 0;
+    char cfg[4096 + 32];
+    snprintf(cfg, sizeof cfg, "%s/ultratears.cfg", path);
+    FILE *f = fopen(cfg, "r");
+    if (!f && (slash = strrchr(path, '/')) && !strcmp(slash, "/build")) {   // build/UltraTears: the folder above
+        *slash = 0;
+        snprintf(cfg, sizeof cfg, "%s/ultratears.cfg", path);
+        f = fopen(cfg, "r");
+    }
+    if (chdir(path)) fprintf(stderr, "[totk] cannot enter %s\n", path);
+    char settings[4096 + 32];
+    snprintf(settings, sizeof settings, "%s/settings.cfg", path);
+    read_cfg(settings, &exefs);
+    if (f) {
+        fclose(f);
+        read_cfg(cfg, &exefs);
+        fprintf(stderr, "[totk] game folder %s (%s)\n", path, cfg);
+    } else
+        fprintf(stderr, "[totk] game folder %s (no ultratears.cfg: setup.py's layout)\n", path);
 #endif
     return exefs;
 }

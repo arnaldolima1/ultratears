@@ -25,7 +25,12 @@ static inline void vkb_lock(pthread_mutex_t *m, int kind) {
 
 // A reader-writer lock for the tables the recording threads read for every draw (pools, the texture registry): readers
 // do not exclude each other. Windows SRWLOCK (pointer-sized, zero = unlocked); backend_vk.c implements it.
+#ifdef __APPLE__   // (fork) a pthread rwlock, set up on first use so that zero-initialised still means unlocked
+#include <pthread.h>
+typedef struct { pthread_rwlock_t rw; _Atomic int state; } vkb_rw;
+#else
 typedef struct { void *opaque; } vkb_rw;
+#endif
 void vkb_rw_read(vkb_rw *l, int kind);
 void vkb_rw_read_end(vkb_rw *l);
 void vkb_rw_write(vkb_rw *l, int kind);
