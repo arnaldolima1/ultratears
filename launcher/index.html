@@ -7,6 +7,21 @@
   <script type="module" src="/src/main.js"></script>
 </head>
 <body>
+  <!-- opening (main.js playIntro): the launcher's own art, skipped by a click or a key -->
+  <div id="intro" aria-hidden="true">
+    <div class="intro-sky"></div>
+    <div class="intro-motes"></div>
+    <svg class="intro-emblem" viewBox="0 0 300 300" aria-hidden="true">
+      <circle class="ring r1" cx="150" cy="150" r="140"/>
+      <circle class="ring r2" cx="150" cy="150" r="108"/>
+      <g class="ticks"><line x1="150.0" y1="36.0" x2="150.0" y2="14.0" style="--i:0"/><line x1="180.5" y1="36.0" x2="184.2" y2="22.5" style="--i:1"/><line x1="207.0" y1="51.3" x2="218.0" y2="32.2" style="--i:2"/><line x1="233.4" y1="66.6" x2="243.3" y2="56.7" style="--i:3"/><line x1="248.7" y1="93.0" x2="267.8" y2="82.0" style="--i:4"/><line x1="264.0" y1="119.5" x2="277.5" y2="115.8" style="--i:5"/><line x1="264.0" y1="150.0" x2="286.0" y2="150.0" style="--i:6"/><line x1="264.0" y1="180.5" x2="277.5" y2="184.2" style="--i:7"/><line x1="248.7" y1="207.0" x2="267.8" y2="218.0" style="--i:8"/><line x1="233.4" y1="233.4" x2="243.3" y2="243.3" style="--i:9"/><line x1="207.0" y1="248.7" x2="218.0" y2="267.8" style="--i:10"/><line x1="180.5" y1="264.0" x2="184.2" y2="277.5" style="--i:11"/><line x1="150.0" y1="264.0" x2="150.0" y2="286.0" style="--i:12"/><line x1="119.5" y1="264.0" x2="115.8" y2="277.5" style="--i:13"/><line x1="93.0" y1="248.7" x2="82.0" y2="267.8" style="--i:14"/><line x1="66.6" y1="233.4" x2="56.7" y2="243.3" style="--i:15"/><line x1="51.3" y1="207.0" x2="32.2" y2="218.0" style="--i:16"/><line x1="36.0" y1="180.5" x2="22.5" y2="184.2" style="--i:17"/><line x1="36.0" y1="150.0" x2="14.0" y2="150.0" style="--i:18"/><line x1="36.0" y1="119.5" x2="22.5" y2="115.8" style="--i:19"/><line x1="51.3" y1="93.0" x2="32.2" y2="82.0" style="--i:20"/><line x1="66.6" y1="66.6" x2="56.7" y2="56.7" style="--i:21"/><line x1="93.0" y1="51.3" x2="82.0" y2="32.2" style="--i:22"/><line x1="119.5" y1="36.0" x2="115.8" y2="22.5" style="--i:23"/></g>
+      <path class="glyph" d="M150 62 L214 150 L150 238 L86 150 Z M150 96 L190 150 L150 204 L110 150 Z"/>
+      <path class="glyph g2" d="M86 150 H214 M150 62 V238"/>
+      <circle class="core" cx="150" cy="150" r="14"/>
+    </svg>
+    <div class="intro-title"><h1><span style="--i:0">U</span><span style="--i:1">L</span><span style="--i:2">T</span><span style="--i:3">R</span><span style="--i:4">A</span><span style="--i:5">T</span><span style="--i:6">E</span><span style="--i:7">A</span><span style="--i:8">R</span><span style="--i:9">S</span></h1><p>Uma nova jornada começa no céu</p></div>
+    <small class="intro-skip">clique para pular</small>
+  </div>
   <!-- background slideshow -->
   <div id="bg" aria-hidden="true"></div>
   <div class="shade" aria-hidden="true"></div>
@@ -61,18 +76,21 @@
     <section class="view" id="view-install">
       <div class="panel wide">
         <h2>Instalação</h2>
-        <p class="lead">Traduz e compila o jogo a partir do <b>seu</b> dump (ExeFS + RomFS da versão 1.4.3). Tudo fica neste PC.</p>
+        <p class="lead">Traduz e compila o jogo a partir dos <b>seus</b> arquivos (versão 1.4.3). Tudo fica na pasta do jogo, que pode estar num disco externo.</p>
+        <div class="panel-scroll">
 
-        <div class="grid2">
-          <label class="field">
-            <span>Pasta do jogo (UltraTears)</span>
-            <div class="path"><input id="home-path" readonly /><button class="ghost" id="pick-home">Alterar</button></div>
-          </label>
-          <label class="field">
-            <span>Dump (pasta com <code>exefs</code> e <code>romfs</code>)</span>
-            <div class="path"><input id="dump-path" placeholder="game\ dentro da pasta do jogo" readonly /><button class="ghost" id="pick-dump">Escolher</button></div>
-          </label>
-        </div>
+        <label class="field">
+          <span>Pasta do jogo <small id="home-free"></small></span>
+          <div class="path"><input id="home-path" readonly /><button class="ghost" id="pick-home">Alterar</button></div>
+        </label>
+
+        <!-- where the dump comes from: a dump-source extension (main.js renderExtSources), or a folder already extracted -->
+        <div id="ext-sources"></div>
+        <label class="field" id="dump-manual">
+          <span>Dump (pasta com <code>exefs</code> e <code>romfs</code>) <button class="link hidden" id="use-ext">usar a extensão</button></span>
+          <div class="path"><input id="dump-path" placeholder="game/ dentro da pasta do jogo" readonly /><button class="ghost" id="pick-dump">Escolher</button></div>
+        </label>
+        <p class="hint hidden" id="dump-done">O jogo já foi empacotado nesta pasta: o dump não é mais necessário.</p>
 
         <div class="row">
           <label class="field slim">
@@ -84,6 +102,8 @@
             <button id="cancel" class="ghost" disabled>Cancelar</button>
           </div>
         </div>
+
+        <label class="check" id="clean-row"><input type="checkbox" id="clean-dump" /> Apagar o dump temporário assim que o build não precisar mais dele (libera ~17 GB)</label>
 
         <div class="progress-block">
           <div class="progress-head">
@@ -100,6 +120,7 @@
           <summary>Registro detalhado</summary>
           <pre id="log"></pre>
         </details>
+        </div>
       </div>
     </section>
 
@@ -108,6 +129,7 @@
       <div class="panel wide">
         <h2>Mods</h2>
         <p class="lead">Melhorias aplicadas pelo port na hora de abrir o jogo. Nenhum arquivo do jogo é modificado.</p>
+        <div class="panel-scroll">
 
         <div class="mods">
           <article class="mod soon" id="mod-fps60">
@@ -144,6 +166,7 @@
             </div>
           </article>
         </div>
+        </div>
       </div>
     </section>
 
@@ -151,12 +174,22 @@
     <section class="view" id="view-settings">
       <div class="panel wide">
         <h2>Configurações</h2>
-        <div class="cards">
-          <div class="card">
+        <div class="panel-scroll split">
+        <div class="settings">
+          <nav class="set-nav">
+            <button class="active" data-set="display">Exibição</button>
+            <button data-set="control">Controle</button>
+            <button data-set="launcher">Launcher</button>
+            <button data-set="extensions">Extensões</button>
+            <button data-set="advanced">Avançado</button>
+          </nav>
+          <div class="set-body">
+          <div class="set-page active" id="set-display">
             <h3>Exibição</h3>
             <label class="toggle"><input type="checkbox" id="set-fps" /><span class="knob"></span><div><b>Contador de FPS</b><small>Mostra o FPS no canto do jogo. <kbd>F3</kbd> liga/desliga durante o jogo.</small></div></label>
             <label class="toggle"><input type="checkbox" id="set-fullscreen" /><span class="knob"></span><div><b>Tela cheia</b><small>Abre o jogo em tela cheia. <kbd>F11</kbd> alterna durante o jogo.</small></div></label>
             <label class="toggle"><input type="checkbox" id="set-borderless" /><span class="knob"></span><div><b>Janela sem borda</b><small>Tira a barra de título do jogo (minimizar, maximizar, fechar). Desligado: janela normal.</small></div></label>
+            <label class="toggle"><input type="checkbox" id="set-handheld" /><span class="knob"></span><div><b>Modo portátil</b><small>O jogo se comporta como no Switch fora da base: saída 1280×720 e resolução interna menor. Mais leve em máquinas fracas.</small></div></label>
             <label class="field res-field" id="res-field">
               <span>Resolução da cena <small>(mod Resolução maior)</small></span>
               <select id="set-res">
@@ -168,20 +201,68 @@
               <small id="res-status"></small>
             </label>
           </div>
-          <div class="card">
-            <h3>Controle</h3>
-            <label class="field">
-              <span>Eixos do giroscópio <small>(ex.: <code>-x,y,-z</code>; vazio = padrão)</small></span>
-              <input id="set-gyro" placeholder="padrão" />
-            </label>
-            <h3 class="mt">Launcher</h3>
+          <div class="set-page" id="set-control">
+            <h3>Controle de jogo</h3>
+            <p class="hint">Qualquer controle que o sistema reconheça (Xbox, PlayStation, Switch Pro, 8BitDo). Os botões seguem o Switch: <b>A</b> é o da direita, <b>B</b> o de baixo.</p>
+            <label class="toggle"><input type="checkbox" id="set-rumble" /><span class="knob"></span><div><b>Vibração</b><small>O jogo vibra o controle (quando ele tem motores).</small></div></label>
+            <label class="toggle"><input type="checkbox" id="set-gyro-on" /><span class="knob"></span><div><b>Giroscópio</b><small>Mira e quebra-cabeças por movimento, com controles que têm sensor (DualSense, Switch Pro).</small></div></label>
+
+            <div class="sub-block" id="gyro-block">
+              <h3 class="mt">Giroscópio</h3>
+              <label class="field">
+                <span>Zona morta: <b id="gyro-dz-val"></b> <small>(rotação mais lenta que isso conta como parado; tira o tremor da mão)</small></span>
+                <div class="range-row"><input type="range" id="set-gyro-dz" min="0" max="5" step="0.1" /><button class="ghost small" id="gyro-dz-auto">Automático</button></div>
+              </label>
+              <label class="field">
+                <span>Eixos <small>(se a mira gira para o lado errado)</small></span>
+                <div class="path">
+                  <select id="set-gyro-preset">
+                    <option value="">Padrão do controle</option>
+                    <option value="x,-y,z">Inverter vertical</option>
+                    <option value="-x,y,-z">Inverter horizontal</option>
+                    <option value="-x,-y,-z">Inverter os dois</option>
+                    <option value="custom">Personalizado…</option>
+                  </select>
+                  <input id="set-gyro" placeholder="ex.: -x,y,-z" spellcheck="false" />
+                </div>
+              </label>
+            </div>
+
+            <h3 class="mt">Teclado</h3>
+            <p class="hint">Layout fixo (o mesmo do MacNativeGames). Um controle conectado funciona junto com o teclado.</p>
+            <div class="keymap">
+              <div><span class="btn-name">Mover</span><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></div>
+              <div><span class="btn-name">Câmera</span><span class="keys"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span></div>
+              <div><span class="btn-name">A</span><span class="keys"><kbd>J</kbd></span></div>
+              <div><span class="btn-name">B</span><span class="keys"><kbd>K</kbd><kbd>Espaço</kbd></span></div>
+              <div><span class="btn-name">X</span><span class="keys"><kbd>I</kbd></span></div>
+              <div><span class="btn-name">Y</span><span class="keys"><kbd>U</kbd></span></div>
+              <div><span class="btn-name">L / R</span><span class="keys"><kbd>Q</kbd><kbd>E</kbd></span></div>
+              <div><span class="btn-name">ZL / ZR</span><span class="keys"><kbd>Option</kbd><kbd>Shift</kbd></span></div>
+              <div><span class="btn-name">Clique L / R</span><span class="keys"><kbd>Z</kbd><kbd>C</kbd></span></div>
+              <div><span class="btn-name">Direcional</span><span class="keys"><kbd>T</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd></span></div>
+              <div><span class="btn-name">+ (menu)</span><span class="keys"><kbd>Return</kbd></span></div>
+              <div><span class="btn-name">− (mapa)</span><span class="keys"><kbd>Tab</kbd><kbd>Esc</kbd></span></div>
+            </div>
+            <p class="hint">No jogo: <kbd>F1</kbd> painel de desempenho, <kbd>F2</kbd> 60 FPS, <kbd>F3</kbd> contador de FPS, <kbd>F11</kbd> tela cheia.</p>
+          </div>
+          <div class="set-page" id="set-launcher">
+            <h3>Launcher</h3>
+            <label class="toggle"><input type="checkbox" id="set-intro" /><span class="knob"></span><div><b>Abertura animada</b><small>A animação ao abrir o launcher (um clique ou tecla pula).</small></div></label>
             <label class="toggle"><input type="checkbox" id="set-music" /><span class="knob"></span><div><b>Música de fundo</b><small>Toca no launcher; para quando o jogo abre. Use sua própria música e imagens: <code>music.mp3</code>, <code>bg1.jpg</code>…, <code>logo.png</code> e <code>loading.jpg</code> na pasta <code>launcher-art</code> (botão abaixo).</small></div></label>
             <label class="field">
               <span>Volume</span>
               <input type="range" id="set-volume" min="0" max="100" />
             </label>
+            <div class="actions left"><button class="ghost" data-open="launcher-art">Arte do launcher</button></div>
           </div>
-          <div class="card span2">
+          <div class="set-page" id="set-extensions">
+            <h3>Extensões</h3>
+            <p class="hint">Programas extras que o launcher usa (um <code>.zip</code> com <code>extension.json</code>). Ficam só neste computador.</p>
+            <ul class="ext-list" id="ext-list"></ul>
+            <div class="actions left"><button class="ghost" id="ext-add">Adicionar extensão (.zip)</button></div>
+          </div>
+          <div class="set-page" id="set-advanced">
             <h3>Avançado</h3>
             <label class="field">
               <span>Variáveis extras (<code>TOTK_NOME=valor</code>, uma por linha)</span>
@@ -191,11 +272,12 @@
               <button class="ghost" data-open=".">Pasta do jogo</button>
               <button class="ghost" data-open="userdata">Saves</button>
               <button class="ghost" data-open="lasrecomp.log">Log do jogo</button>
-              <button class="ghost" data-open="launcher-art">Arte do launcher</button>
             </div>
+          </div>
           </div>
         </div>
         <p class="saved" id="saved">Salvo</p>
+        </div>
       </div>
     </section>
 
@@ -204,6 +286,7 @@
       <div class="panel wide about">
         <h2>Sobre</h2>
         <p class="lead"><b>UltraTears</b> é um port nativo não oficial de <i>The Legend of Zelda: Tears of the Kingdom</i> 1.4.3 para PC. Não é um emulador: o código do jogo é traduzido antes (recompilação estática ARM64 → C → x86-64) e o sistema do Switch e a API gráfica NVN são substituídos por implementações próprias em Windows e Vulkan.</p>
+        <div class="panel-scroll">
 
         <div class="hero-credit">
           <div class="hero-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.2 4.6L12 22 9.8 6.6z" fill="currentColor"/><path d="M7 7.5h10" stroke="currentColor" stroke-width="1.6"/></svg></div>
@@ -232,6 +315,7 @@
           <p>Distribuído sob a <b>GNU GPL v3</b> ou posterior; cada componente de terceiros mantém sua licença.</p>
           <p>Nada do jogo vem com o port: tudo é gerado no seu PC a partir do seu próprio dump e deve ficar aqui. Não afiliado nem endossado pela Nintendo. <i>The Legend of Zelda</i> e <i>Tears of the Kingdom</i> são marcas da Nintendo.</p>
         </div>
+        </div>
       </div>
     </section>
   </main>
@@ -240,7 +324,9 @@
   <div id="transition" aria-hidden="true">
     <div class="t-bg"></div>
     <div class="t-emblem"><img id="t-img" alt="" hidden /><div class="t-neutral" id="t-neutral"><div class="t-word"><div class="orn"><i></i><u></u><i></i></div><div class="wordmark"><b>ULTRATEARS</b><span>Tears of the Kingdom · PC</span></div><div class="orn"><i></i><u></u><i></i></div></div></div></div>
-    <div class="t-text"><span id="t-msg">Despertando o reino</span><span class="t-dots"><i></i><i></i><i></i></span></div>
+    <div class="t-text"><span id="t-msg">Uma nova jornada começa no céu</span><span class="t-dots"><i></i><i></i><i></i></span></div>
+    <!-- the game's start-up (startup.txt, main.js watchStartup): compiling shaders n / total -->
+    <div class="t-status" id="t-status"><span id="t-status-text"></span><div class="t-bar"><i id="t-bar"></i></div></div>
   </div>
 
   <!-- dialog -->

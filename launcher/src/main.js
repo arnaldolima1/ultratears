@@ -90,6 +90,10 @@ function showView(name) {
   document.body.classList.toggle('panel-open', name !== 'home');
 }
 $$('.tab').forEach((t) => (t.onclick = () => showView(t.dataset.view)));
+$$('[data-set]').forEach((b) => (b.onclick = () => {
+  $$('[data-set]').forEach((x) => x.classList.toggle('active', x === b));
+  $$('.set-page').forEach((pg) => pg.classList.toggle('active', pg.id === `set-${b.dataset.set}`));
+}));
 
 // ---------------------------------------------------------------- status
 let status = {};
@@ -106,19 +110,45 @@ async function refresh() {
   if (status.building) msg.innerHTML = 'Instalação em andamento…';
   else if (status.running) msg.innerHTML = 'O jogo está aberto';
   else if (status.installed) msg.innerHTML = `Pronto para jogar · <b>Tears of the Kingdom 1.4.3</b>`;
-  else if (!status.tools) msg.innerHTML = 'Escolha a pasta do UltraTears em <b>Instalação</b>';
+  else if (!status.can_build) msg.innerHTML = 'Escolha a pasta do jogo em <b>Instalação</b>';
   else msg.innerHTML = 'Jogo ainda não instalado · leva cerca de 30 min';
+  renderInstallSource();
+}
+
+// How much the install still needs on the game folder's disk (README.md sizes): the dump while it is there
+// (~17 GB), the packed RomFS (~17 GB), textures, generated code, objects and the game (~13 GB).
+function renderInstallSource() {
+  const need = status.installed ? 0 : (status.packed ? 14 : 31) + (status.dump_ready || status.packed ? 0 : 17);
+  const free = status.free_gb;
+  const el = $('#home-free');
+  el.textContent = free == null ? '' : `· ${free.toFixed(0)} GB livres${need ? ` (precisa de ~${need} GB)` : ''}`;
+  el.classList.toggle('low', free != null && free < need);
+  const ext = installSource();
+  $('#dump-done').classList.toggle('hidden', !status.packed);
+  $('#dump-manual').classList.toggle('hidden', status.packed || !!ext);
+  $('#ext-sources').classList.toggle('hidden', status.packed || !ext);
+  $('#use-ext').classList.toggle('hidden', !extensions.some(usableSource));
+  $('#clean-row').classList.toggle('hidden', status.packed && !status.temp_dump);
+  $('#clean-dump').checked = prefs.cleanDump !== false;
 }
 
 // ---------------------------------------------------------------- settings (settings.cfg)
-const KNOWN = ['TOTK_FPS_OVERLAY', 'TOTK_FULLSCREEN', 'TOTK_GYRO_AXES', 'TOTK_FPS60', 'TOTK_RENDER_RES'];
+const KNOWN = ['TOTK_FPS_OVERLAY', 'TOTK_FULLSCREEN', 'TOTK_GYRO_AXES', 'TOTK_FPS60', 'TOTK_RENDER_RES', 'TOTK_RUMBLE', 'TOTK_GYRO',
+  'TOTK_GYRO_DEADZONE', 'TOTK_OPERATION_MODE'];
 function showResField() { $('#res-field').classList.toggle('on', $('#set-resmod').checked); }
 let settings = {};
 async function loadSettings() {
   settings = await invoke('read_settings');
   $('#set-fps').checked = settings.TOTK_FPS_OVERLAY === '1';
   $('#set-fullscreen').checked = settings.TOTK_FULLSCREEN === '1';
+  // controls: rumble and gyro are on unless "0" (host/hid_feedback.c); the dead zone empty = the controller's default
+  $('#set-rumble').checked = settings.TOTK_RUMBLE !== '0';
+  $('#set-gyro-on').checked = settings.TOTK_GYRO !== '0';
+  $('#set-handheld').checked = settings.TOTK_OPERATION_MODE === 'handheld';
   $('#set-gyro').value = settings.TOTK_GYRO_AXES || '';
+  $('#set-gyro-dz').value = settings.TOTK_GYRO_DEADZONE || 0;
+  $('#set-gyro-dz').dataset.auto = settings.TOTK_GYRO_DEADZONE ? '' : '1';
+  showGyro();
   $('#set-fps60').checked = settings.TOTK_FPS60 === '1';
   $('#mod-fps60').classList.toggle('on', $('#set-fps60').checked);
   $('#set-resmod').checked = !!settings.TOTK_RENDER_RES;
@@ -135,6 +165,10 @@ async function saveSettings() {
     TOTK_FPS_OVERLAY: $('#set-fps').checked ? '1' : '',
     TOTK_FULLSCREEN: $('#set-fullscreen').checked ? '1' : '',
     TOTK_GYRO_AXES: $('#set-gyro').value.trim(),
+    TOTK_RUMBLE: $('#set-rumble').checked ? '' : '0',
+    TOTK_GYRO: $('#set-gyro-on').checked ? '' : '0',
+    TOTK_GYRO_DEADZONE: $('#set-gyro-dz').dataset.auto ? '' : String(+$('#set-gyro-dz').value),
+    TOTK_OPERATION_MODE: $('#set-handheld').checked ? 'handheld' : '',
     TOTK_FPS60: $('#set-fps60').checked ? '1' : '',
     TOTK_RENDER_RES: $('#set-resmod').checked ? $('#set-res').value : '',
   };
@@ -150,7 +184,25 @@ async function saveSettings() {
     savedTimer = setTimeout(() => $('#saved').classList.remove('on'), 1400);
   } catch (e) { showError('Não foi possível salvar', String(e)); }
 }
-['#set-fps', '#set-fullscreen', '#set-fps60'].forEach((s) => ($(s).onchange = saveSettings));
+['#set-fps', '#set-fullscreen', '#set-fps60', '#set-rumble', '#set-handheld'].forEach((s) => ($(s).onchange = saveSettings));
+// Gyro: its options only matter with it on; the axes field follows the preset (or is typed: "custom")
+function showGyro() {
+  $('#set-control').classList.toggle('disabled-gyro', !$('#set-gyro-on').checked);
+  const dz = $('#set-gyro-dz');
+  $('#gyro-dz-val').textContent = dz.dataset.auto ? 'automática' : `${(+dz.value).toFixed(1)} °/s`;
+  const v = $('#set-gyro').value.trim(), preset = $('#set-gyro-preset');
+  preset.value = [...preset.options].some((o) => o.value === v && v !== 'custom') ? v : 'custom';
+  $('#set-gyro').classList.toggle('hidden', preset.value !== 'custom');
+}
+$('#set-gyro-on').onchange = () => { showGyro(); saveSettings(); };
+$('#set-gyro-dz').oninput = (e) => { e.target.dataset.auto = ''; showGyro(); };
+$('#set-gyro-dz').onchange = saveSettings;
+$('#gyro-dz-auto').onclick = () => { $('#set-gyro-dz').dataset.auto = '1'; $('#set-gyro-dz').value = 0; showGyro(); saveSettings(); };
+$('#set-gyro-preset').onchange = (e) => {
+  if (e.target.value !== 'custom') $('#set-gyro').value = e.target.value;
+  $('#set-gyro').classList.toggle('hidden', e.target.value !== 'custom');
+  if (e.target.value === 'custom') $('#set-gyro').focus(); else saveSettings();
+};
 ['#set-gyro', '#set-extra'].forEach((s) => ($(s).onchange = saveSettings));
 // The resolution mod: the heap overlay for the chosen size is made first (tools/make_res_overlay.py), then saved.
 async function applyRes() {
@@ -189,7 +241,9 @@ $('#dialog-log').onclick = () => invoke('open_path', { path: 'lasrecomp.log' });
 
 // ---------------------------------------------------------------- build
 // Steps of tools/setup.py with their usual share of the time (8-core PC, README.md).
-const STEPS = [
+// "extract" (a dump-source extension) only when the install starts with it: useSteps().
+const EXTRACT = ['extract', 'Extrair', 'NSP / XCI → dump', 6];
+const BUILD_STEPS = [
   ['check', 'Verificar', 'versão do dump', 1],
   ['romfs', 'RomFS', 'empacotar arquivos', 4],
   ['lift', 'Traduzir', 'código → C', 2],
@@ -198,8 +252,14 @@ const STEPS = [
   ['textures', 'Texturas', 'BC7 / BC1', 7],
   ['finish', 'Concluir', 'configuração', 0.5],
 ];
-const TOTAL = STEPS.reduce((a, s) => a + s[3], 0);
-const build = { step: -1, sub: 0, start: 0, stepStart: 0, state: STEPS.map(() => ''), running: false };
+let STEPS = BUILD_STEPS, TOTAL = 0;
+function useSteps(extract) {
+  STEPS = extract ? [EXTRACT, ...BUILD_STEPS] : BUILD_STEPS;
+  TOTAL = STEPS.reduce((a, s) => a + s[3], 0);
+  build.state = STEPS.map(() => '');
+  buildSteps();
+}
+const build = { step: -1, sub: 0, start: 0, stepStart: 0, state: [], running: false };
 
 function buildSteps() {
   $('#steps').innerHTML = STEPS.map(([id, name, what]) =>
@@ -247,6 +307,7 @@ function onBuildLine({ text, err }) {
     const i = STEPS.findIndex((s) => s[0] === stepLine[2]);
     for (let k = 0; k < i; k++) if (build.state[k] !== 'done') build.state[k] = 'done';
     build.step = i; build.sub = 0; build.state[i] = 'run'; build.stepStart = Date.now();
+    if (i >= 2) cleanTempDump();   // the RomFS is packed: the extracted dump is not read any more
     $('#build-phase').textContent = `${STEPS[i][1]} · ${STEPS[i][2]}`;
     logLine(t, 'step');
     renderBuild();
@@ -272,10 +333,10 @@ function onBuildLine({ text, err }) {
   renderBuild();
 }
 
-async function startBuild() {
-  build.state = STEPS.map(() => ''); build.step = -1; build.sub = 0; build.start = Date.now();
+async function startBuild(afterExtract = false) {
+  if (!afterExtract) { useSteps(false); build.start = Date.now(); }
+  build.step = -1; build.sub = 0;
   $('.bar').classList.remove('error');
-  logEl.textContent = '';
   $('#build-phase').textContent = 'Iniciando…';
   renderBuild();
   try {
@@ -283,7 +344,8 @@ async function startBuild() {
     setBuilding(true);
   } catch (e) { showError('Não foi possível iniciar a instalação', String(e)); }
 }
-$('#build').onclick = startBuild;
+$('#build').onclick = install;
+$('#clean-dump').onchange = (e) => { prefs.cleanDump = e.target.checked; savePrefs(); };
 $('#cancel').onclick = () => invoke('cancel_build');
 $('#cpus').oninput = (e) => { $('#cpus-val').textContent = e.target.value; prefs.cpus = +e.target.value; savePrefs(); };
 
@@ -310,15 +372,145 @@ listen('build-done', async (e) => {
   build.sub = ok ? 1 : build.sub;
   renderBuild();
   setBuilding(false);
+  if (ok) cleanTempDump();
   if (!ok && e.payload === 1) showError('A instalação parou', [...logEl.childNodes].slice(-14).map((n) => n.textContent).join(''));
 });
+
+// ---------------------------------------------------------------- extensions
+// Installed from a .zip in Configurações (main.rs install_extension). A "dump-source" one gets a block in Instalação:
+// the files it asks for, the output folder (default: game/ in the game folder), and "Extrair"; its lines
+// "progress <done> <total>" move its bar. Chosen paths are remembered per extension (prefs.ext[id]).
+let extensions = [];
+let extRun = null;   // { id }: the extraction running, the build follows it
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const baseName = (p) => p.split(/[\\/]/).pop();
+prefs.ext = prefs.ext || {};
+
+async function loadExtensions() {
+  try { extensions = await invoke('list_extensions'); } catch { extensions = []; }
+  $('#ext-list').innerHTML = extensions.length ? extensions.map((e) => `<li><div><b>${esc(e.name)}</b> <small>${esc(e.version)} · ${esc(e.id)}${e.supported ? '' : ' · sem programa para este sistema'}</small><small>${esc(e.description)}</small></div><button class="ghost" data-ext-remove="${esc(e.id)}">Remover</button></li>`).join('')
+    : '<li class="empty">Nenhuma extensão instalada.</li>';
+  $$('[data-ext-remove]').forEach((b) => (b.onclick = async () => {
+    try { await invoke('remove_extension', { id: b.dataset.extRemove }); } catch (e) { showError('Não foi possível remover', String(e)); }
+    loadExtensions();
+  }));
+  renderExtSources();
+}
+
+const usableSource = (e) => e.kind === 'dump-source' && e.supported;
+// The extension that makes the dump, unless the player chose a folder already extracted (prefs.source = 'folder')
+function installSource() {
+  return prefs.source === 'folder' ? null : extensions.find(usableSource) || null;
+}
+
+function renderExtSources() {
+  const e = installSource();
+  if (!e) { $('#ext-sources').innerHTML = ''; if (status.home) renderInstallSource(); return; }
+  const chosen = prefs.ext[e.id] || {};
+  const fields = e.inputs.map((i) => {
+    const v = chosen[i.key] || [];
+    const shown = v.length > 1 ? `${v.length} arquivos: ${v.map(baseName).join(', ')}` : (v[0] || '');
+    return `<label class="field"><span>${esc(i.label)}</span><div class="path"><input readonly value="${esc(shown)}" title="${esc(v.join('\n'))}" /><button class="ghost" data-ext-pick="${esc(i.key)}">Escolher</button></div></label>`;
+  }).join('');
+  $('#ext-sources').innerHTML = `<div class="ext-source" data-ext="${esc(e.id)}">
+    <h3>${esc(e.name)} <button class="link" id="use-folder">já tenho o exefs e o romfs extraídos</button></h3>
+    <p class="hint">${esc(e.description)} O dump vai para <code>game/</code> na pasta do jogo; Instalar extrai e já compila em seguida.</p>
+    <div class="grid2">${fields}</div>
+  </div>`;
+  $$('[data-ext-pick]').forEach((b) => (b.onclick = async () => {
+    const i = e.inputs.find((x) => x.key === b.dataset.extPick);
+    const dir = i.type === 'dir';
+    const got = await openDialog({ title: i.label, multiple: i.type === 'files', directory: dir,
+      filters: !dir && i.extensions.length ? [{ name: i.label, extensions: i.extensions }] : undefined });
+    if (!got) return;
+    prefs.ext[e.id] = Object.assign(prefs.ext[e.id] || {}, { [i.key]: Array.isArray(got) ? got : [got] });
+    savePrefs();
+    renderExtSources();
+  }));
+  $('#use-folder').onclick = () => { prefs.source = 'folder'; savePrefs(); renderExtSources(); };
+  if (status.home) renderInstallSource();
+}
+$('#use-ext').onclick = () => { prefs.source = 'ext'; savePrefs(); renderExtSources(); };
+
+// Instalar: the build straight away when the game is already packed or a dump is there; otherwise the extension
+// makes the dump first (then the build follows from ext-done).
+async function install() {
+  await refresh();
+  const e = installSource();
+  // (with the extension: only a dump it finished, TEMP_MARK; a partial one is resumed by running it again)
+  if (status.packed || (e ? status.temp_dump : true)) { logEl.textContent = ''; return startBuild(); }
+  const chosen = prefs.ext[e.id] || {};
+  const missing = e.inputs.find((i) => !(chosen[i.key] || []).length);
+  if (missing) return showError('Falta escolher', missing.label);
+  useSteps(true);
+  build.start = build.stepStart = Date.now(); build.step = 0; build.sub = 0; build.state[0] = 'run';
+  $('.bar').classList.remove('error');
+  logEl.textContent = '';
+  $('#build-phase').textContent = `${EXTRACT[1]} · ${e.name}`;
+  $('#build-activity').textContent = 'Lendo os pacotes…';
+  renderBuild();
+  try {
+    await invoke('run_extension', { id: e.id, inputs: Object.fromEntries(e.inputs.map((i) => [i.key, chosen[i.key]])), out: '' });
+    extRun = { id: e.id };
+    setBuilding(true);
+  } catch (err) { showError('Não foi possível iniciar a extração', String(err)); }
+}
+
+let cleaning = false;
+async function cleanTempDump() {
+  if (prefs.cleanDump === false || cleaning || !status.temp_dump) return;
+  cleaning = true;
+  try {
+    const gb = await invoke('remove_temp_dump');
+    if (gb) logLine(`Dump temporário apagado: ${gb.toFixed(1)} GB liberados`, 'step');
+    await refresh();
+  } catch { /* not packed yet: next step */ }
+  cleaning = false;
+}
+
+listen('ext-line', ({ payload: { text, err } }) => {
+  const m = text.match(/^progress (\d+) (\d+)$/);
+  if (m) {
+    const done = +m[1], total = +m[2], secs = (Date.now() - build.stepStart) / 1000;
+    build.sub = total ? Math.min(1, done / total) : 0;
+    $('#build-activity').textContent = `${(done / 1e9).toFixed(1)} de ${(total / 1e9).toFixed(1)} GB` +
+      (secs > 3 ? ` · ${(done / 1e6 / secs).toFixed(0)} MB/s` : '');
+    renderBuild();
+    return;
+  }
+  logLine(text, err ? 'err' : '');
+  if (text.trim()) $('#build-activity').textContent = text.trim().slice(0, 160);
+});
+listen('ext-done', async ({ payload: code }) => {
+  extRun = null;
+  setBuilding(false);
+  if (code !== 0) {
+    build.state[0] = 'fail';
+    $('.bar').classList.add('error');
+    $('#build-phase').textContent = code === 1 ? 'Erro na extração' : 'Cancelado';
+    renderBuild();
+    if (code === 1) showError('A extração parou', [...logEl.childNodes].slice(-14).map((n) => n.textContent).join(''));
+    return;
+  }
+  build.state[0] = 'done'; build.sub = 1;
+  renderBuild();
+  startBuild(true);
+});
+
+$('#ext-add').onclick = async () => {
+  const zip = await openDialog({ title: 'Extensão do launcher', filters: [{ name: 'Extensão', extensions: ['zip'] }] });
+  if (!zip) return;
+  try { const e = await invoke('install_extension', { zip }); showError('Extensão adicionada', `${e.name} ${e.version}`); }
+  catch (e) { showError('Não foi possível adicionar a extensão', String(e)); }
+  loadExtensions();
+};
 
 // ---------------------------------------------------------------- play: transition, hand-over, return
 async function play() {
   if (!status.installed) { showView('install'); return; }
   const fullscreen = $('#set-fullscreen').checked;
   document.body.classList.add('in-game');
-  $('#t-msg').textContent = 'Despertando o reino';
+  $('#t-msg').textContent = 'Uma nova jornada começa no céu';
   $('#transition').classList.add('on');
   fadeMusic(0, 1400);
   if (fullscreen) await win.setFullscreen(true);
@@ -328,6 +520,7 @@ async function play() {
     await invoke('launch_game', {
       rect: [pos.x, pos.y, size.width, size.height], fullscreen, borderless: prefs.frameless,
     });
+    watchStartup();
     refresh();
   } catch (e) {
     backFromGame();
@@ -345,6 +538,31 @@ async function backFromGame() {
   refresh();
 }
 $('#play').onclick = play;
+
+// The game's start-up under the transition (startup.txt via main.rs startup_status): what it is doing while its window
+// stays hidden - preparing, then compiling the shaders it made ahead (n / total) - until it shows ("ready").
+let startupTimer;
+function watchStartup() {
+  const box = $('#t-status'), text = $('#t-status-text'), bar = $('#t-bar');
+  const t0 = Date.now();
+  clearInterval(startupTimer);
+  box.classList.remove('on', 'busy');
+  startupTimer = setInterval(async () => {
+    let s = '';
+    try { s = await invoke('startup_status'); } catch { /* not yet */ }
+    const m = s.match(/^shaders (\d+) (\d+)/);
+    if (s.startsWith('ready') || !document.body.classList.contains('in-game')) { clearInterval(startupTimer); box.classList.remove('on'); return; }
+    if (m && +m[2]) {
+      box.classList.add('on'); box.classList.remove('busy');
+      const n = Math.min(+m[1], +m[2]);
+      text.textContent = `Compilando shaders · ${n.toLocaleString('pt-BR')} / ${(+m[2]).toLocaleString('pt-BR')}`;
+      bar.style.width = `${(n / +m[2]) * 100}%`;
+    } else if (Date.now() - t0 > 1500) {   // (the tagline alone first)
+      box.classList.add('on', 'busy');
+      text.textContent = 'Preparando o jogo';
+    }
+  }, 250);
+}
 listen('game-visible', async () => {
   await new Promise((r) => setTimeout(r, 250));   // the game's first frame is up behind us
   await win.hide();
@@ -358,10 +576,31 @@ listen('game-exit', async (e) => {
 });
 
 // ---------------------------------------------------------------- start
+// ---------------------------------------------------------------- opening
+// index.html #intro: plays once at start (prefs.intro, Configurações > Launcher); a click or a key skips it.
+function playIntro() {
+  const el = $('#intro');
+  if (prefs.intro === false || matchMedia('(prefers-reduced-motion: reduce)').matches) { el.classList.add('gone'); return; }
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    el.classList.add('done');
+    setTimeout(() => el.classList.add('gone'), 950);
+    removeEventListener('keydown', end);
+  };
+  el.onclick = end;
+  addEventListener('keydown', end);
+  setTimeout(end, 3600);
+}
+playIntro();
+$('#set-intro').checked = prefs.intro !== false;
+$('#set-intro').onchange = (e) => { prefs.intro = e.target.checked; savePrefs(); };
+
 (async function init() {
   await loadArt();
   buildSlides();
-  buildSteps();
+  useSteps(false);
   renderBuild();
   const n = await invoke('cpu_count');
   $('#cpus').max = n;
@@ -369,6 +608,7 @@ listen('game-exit', async (e) => {
   $('#cpus-val').textContent = $('#cpus').value;
   await refresh();
   await loadSettings();
+  await loadExtensions();
   setBuilding(status.building);
   bgm.volume = 0;
   applyMusic();
