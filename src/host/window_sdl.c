@@ -51,7 +51,11 @@ static void startup_status(const char *text) {
     if (!f) return;
     fputs(text, f);
     fclose(f);
+#ifdef _WIN32   // (rename does not replace an existing file there)
+    MoveFileExA("startup.txt.tmp", "startup.txt", MOVEFILE_REPLACE_EXISTING);
+#else
     rename("startup.txt.tmp", "startup.txt");
+#endif
 }
 static bool startup_holding(void) {
     static uint64_t first_frame, last_write;
