@@ -61,6 +61,8 @@ typedef struct {
     uint64_t host_pointer_alignment;   // VK_EXT_external_memory_host
     int has_descriptor_buffer, has_gpl, has_eds3, has_vertex_input_ds, has_depth_clip_control, has_shader_object, has_interlock;
     int has_feedback_loop;   // VK_EXT_attachment_feedback_loop_layout + _dynamic_state: sampling a bound attachment
+    VkImageLayout fb_layout; // a target sampled while bound: the feedback loop layout, else GENERAL (0: not sampled)
+    int fb_color;            // colour targets too (else only depth is sampled while bound)
     int has_local_read;      // VK_KHR_dynamic_rendering_local_read: barriers inside a pass (draws reading what earlier draws wrote)
     VkPhysicalDeviceDescriptorBufferPropertiesEXT db;   // VK_EXT_descriptor_buffer: descriptor sizes, alignment, ranges
     int has_checkpoints;     // TOTK_VK_CHECKPOINTS=1: VK_NV_device_diagnostic_checkpoints (where a lost device stopped)

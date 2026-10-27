@@ -414,7 +414,7 @@ static int fb_index(const vkb_image *im) {   // the target bit of a sampled imag
 static void feedback_scan(const vkb_shader *vs, const vkb_shader *fs) {
     g_fb = 0;
     memset(g_fb_rt, 0, sizeof g_fb_rt);
-    if (!vkc.has_feedback_loop) return;
+    if (!vkc.fb_layout) return;
     const p_set_rt *rt = vkb_rt();
     int n = rt->n < 0 ? 0 : rt->n > 8 ? 8 : rt->n, any = 0;
     for (int i = 0; i < n; i++) if (rt->color[i]) any |= (g_fb_rt[i] = vkb_image_of(rt->color[i])) != NULL;
@@ -428,6 +428,7 @@ static void feedback_scan(const vkb_shader *vs, const vkb_shader *fs) {
             if (b >= 0) g_fb |= 1u << b;
         }
     }
+    if (!vkc.fb_color) g_fb &= VKB_FB_DEPTH;
 }
 static int fb_sampled(const vkb_image *im) { int b = fb_index(im); return b >= 0 && ((g_fb >> b) & 1); }
 
@@ -864,7 +865,7 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         const view_t *v = NULL;
         vkb_image *im = h ? handle_image(h, &v) : NULL;
         VkImageViewType vt = view_type_of(sh->tex[i].type);
-        int readable = im && (fb_sampled(im) ? vkb_layout_is(im, VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
+        int readable = im && (fb_sampled(im) ? vkb_layout_is(im, vkc.fb_layout)
                                              : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
         VkImageView view = readable ? vkb_view(im, v, 0, (int)vt) : VK_NULL_HANDLE;
         if (sh->tex[i].separate) vkb_audit(A_TEX_SEPARATE, sh->key);

@@ -1040,7 +1040,7 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
     if (g_in_pass) return 1;
     shadow_presync();
     g_pass_serial++;
-    if (!vkc.has_feedback_loop) fb = 0;
+    if (!vkc.fb_layout) fb = 0;
     g_pass_fb = fb;
     VkCommandBuffer cb = vkb_cmd();
     if (vkb_stores_take()) {   // storage writes of earlier draws are visible to this pass (vkb_draw.c g_stores_pending)
@@ -1067,7 +1067,7 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
             continue;
         }
         int loop = (fb >> i) & 1;
-        VkImageLayout layout = loop ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkImageLayout layout = loop ? vkc.fb_layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         vkb_image_use(cb, im, layout, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | (loop ? VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT : 0),
                       VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | (loop ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0));
         color[i].imageView = vkb_view(im, v, 1, -1);
@@ -1085,7 +1085,7 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
     if (dim && (dim->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
         const view_t *v = g_rt.has_dview ? &g_rt.dview : NULL;
         int loop = (fb & VKB_FB_DEPTH) != 0;
-        VkImageLayout layout = loop ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        VkImageLayout layout = loop ? vkc.fb_layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         vkb_image_use(cb, dim, layout,
                       VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT | (loop ? VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT : 0),
                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | (loop ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0));

@@ -40,8 +40,30 @@ static void *game_main(void *unused);
 // are setup.py's layout (data\\exefs, data\\romfs, data\\shaders\\ryujinx, data\\textures, data\\fonts, userdata).
 // ultratears.cfg there may name other places: lines "name=value" give the ExeFS (exefs=), the RomFS image (romfs=),
 // shaders, texture cache, saves and fonts, each as the TOTK_* variable it stands for unless that is already set (a
-// TOTK_* line sets one directly).
+// TOTK_* line sets one directly). settings.cfg next to it holds the player's settings (the launcher writes it; setup.py
+// rewrites only ultratears.cfg) and is read first, so its TOTK_* lines win.
 static char g_exefs[4096];
+static void read_cfg(const char *cfg, const char **exefs) {
+    FILE *f = fopen(cfg, "r");
+    if (!f) return;
+    char line[4600];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *eq = strchr(line, '=');
+        if (!eq || line[0] == '#') continue;
+        *eq = 0;
+        static const char *const keys[][2] = {   // the file's names -> the runtime's variables
+            {"romfs", "TOTK_ROMFS"}, {"shaders", "TOTK_SHADER_DIR"}, {"textures", "TOTK_BC7_DIR"},
+            {"saves", "TOTK_PROFILE_DIR"}, {"fonts", "TOTK_SHARED_FONTS"}};
+        if (!strcmp(line, "exefs")) snprintf(g_exefs, sizeof g_exefs, "%s", eq + 1), *exefs = g_exefs;
+        else if (!strncmp(line, "TOTK_", 5)) setenv(line, eq + 1, 0);
+        else
+            for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
+                if (!strcmp(line, keys[i][0])) setenv(keys[i][1], eq + 1, 0);
+    }
+    fclose(f);
+}
+
 static const char *default_exefs(void) {
     const char *exefs = "data/exefs";
 #ifdef _WIN32
@@ -59,23 +81,12 @@ static const char *default_exefs(void) {
         f = fopen(cfg, "r");
     }
     if (!SetCurrentDirectoryA(path)) fprintf(stderr, "[totk] cannot enter %s\n", path);
+    char settings[MAX_PATH + 32];
+    snprintf(settings, sizeof settings, "%s\\settings.cfg", path);
+    read_cfg(settings, &exefs);
     if (f) {
-        char line[4600];
-        while (fgets(line, sizeof line, f)) {
-            line[strcspn(line, "\r\n")] = 0;
-            char *eq = strchr(line, '=');
-            if (!eq || line[0] == '#') continue;
-            *eq = 0;
-            static const char *const keys[][2] = {   // the file's names -> the runtime's variables
-                {"romfs", "TOTK_ROMFS"}, {"shaders", "TOTK_SHADER_DIR"}, {"textures", "TOTK_BC7_DIR"},
-                {"saves", "TOTK_PROFILE_DIR"}, {"fonts", "TOTK_SHARED_FONTS"}};
-            if (!strcmp(line, "exefs")) snprintf(g_exefs, sizeof g_exefs, "%s", eq + 1), exefs = g_exefs;
-            else if (!strncmp(line, "TOTK_", 5)) setenv(line, eq + 1, 0);
-            else
-                for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
-                    if (!strcmp(line, keys[i][0])) setenv(keys[i][1], eq + 1, 0);
-        }
         fclose(f);
+        read_cfg(cfg, &exefs);
         fprintf(stderr, "[totk] game folder %s (%s)\n", path, cfg);
     } else
         fprintf(stderr, "[totk] game folder %s (no ultratears.cfg: setup.py's layout)\n", path);

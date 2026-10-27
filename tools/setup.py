@@ -65,7 +65,10 @@ def say(msg):
 
 
 def is_checkout():
-    r = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    try:
+        r = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    except OSError:   # no git on this PC: a builder package
+        return False
     return r.returncode == 0 and pathlib.Path(r.stdout.strip()).resolve() == ROOT
 
 

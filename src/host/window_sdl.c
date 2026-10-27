@@ -5,12 +5,20 @@
 //  - game controllers: buttons by position as on a Switch controller (the right face button is A), sticks with Y up;
 //  - rumble: the game's vibration values (hid_feedback.c) drive the controller's low / high frequency motors.
 //  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen.
+//  - F3: the frame rate over the picture (TOTK_FPS_OVERLAY=1 starts with it on).
+// A launcher hands the window over with TOTK_WINDOW=x,y,w,h (pixels), TOTK_BORDERLESS=1, TOTK_FULLSCREEN=1 and
+// TOTK_START_HIDDEN=1: the window stays hidden until the first game frame is shown, so its own window can stay up
+// (a loading screen) until then.
 #include <SDL3/SDL.h>
 #define SDL_MAIN_HANDLED   // main() is boot.c's; SDL only gets SDL_SetMainReady
 #include <SDL3/SDL_main.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "host.h"
 #include "../vk/present.h"
@@ -18,6 +26,12 @@
 static SDL_Window *window;
 static SDL_Gamepad *pad;
 static SDL_Mutex *pad_lock;
+static bool hidden_until_frame, fps_overlay;
+
+static bool env_on(const char *name) {
+    const char *e = getenv(name);
+    return e && *e && strcmp(e, "0");
+}
 
 static int mac_key(SDL_Scancode s) {
     switch (s) {
@@ -92,8 +106,25 @@ int window_init(void) {
         return 0;
     }
     pad_lock = SDL_CreateMutex();
-    window = SDL_CreateWindow("UltraTears", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    hidden_until_frame = env_on("TOTK_START_HIDDEN");
+    fps_overlay = env_on("TOTK_FPS_OVERLAY");
+    SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (hidden_until_frame) flags |= SDL_WINDOW_HIDDEN;
+    if (env_on("TOTK_BORDERLESS")) flags |= SDL_WINDOW_BORDERLESS;
+    window = SDL_CreateWindow("UltraTears", 1280, 720, flags);
     if (!window) { fprintf(stderr, "[totk] window: %s\n", SDL_GetError()); return 0; }
+    int x, y, w, h;
+    const char *geo = getenv("TOTK_WINDOW");
+    if (geo && sscanf(geo, "%d,%d,%d,%d", &x, &y, &w, &h) == 4 && w > 0 && h > 0) {
+#ifdef _WIN32   // in pixels, as the launcher measured its own window (SDL's sizes may be scaled by the display)
+        HWND hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+        if (hwnd) SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+#else
+        SDL_SetWindowPosition(window, x, y);
+        SDL_SetWindowSize(window, w, h);
+#endif
+    }
+    if (env_on("TOTK_FULLSCREEN")) SDL_SetWindowFullscreen(window, true);   // on the display the window is on
     if (!vkp_init(window))
         runtime_fail("Vulkan initialization failed (Vulkan 1.3 with VK_EXT_shader_object is required)");
     return 1;
@@ -170,6 +201,11 @@ static void title_update(void) {
     char title[128];
     snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", (game - game0) / s, (shown - shown0) / s);
     SDL_SetWindowTitle(window, title);
+    if (fps_overlay) {
+        char text[32];
+        snprintf(text, sizeof text, "%.0f FPS", (game - game0) / s);
+        vkp_overlay(text);
+    }
     t0 = now; game0 = game; shown0 = shown;
 }
 
@@ -189,6 +225,11 @@ _Noreturn void window_loop(void) {
                         toggle_fullscreen();
                         break;
                     }
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
+                        fps_overlay = !fps_overlay;
+                        if (!fps_overlay) vkp_overlay(NULL);
+                        break;
+                    }
                     int k = mac_key(e.key.scancode);
                     if (k >= 0 && !e.key.repeat) runtime_input_key((unsigned)k, e.type == SDL_EVENT_KEY_DOWN);
                     break;
@@ -204,6 +245,11 @@ _Noreturn void window_loop(void) {
                 default: break;
                 }
             } while (SDL_PollEvent(&e));
+        }
+        if (hidden_until_frame && vkp_game_shown()) {
+            hidden_until_frame = false;
+            SDL_ShowWindow(window);
+            SDL_RaiseWindow(window);
         }
         title_update();
     }

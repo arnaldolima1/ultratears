@@ -201,8 +201,19 @@ static int create_device(void) {
         return 0;
     }
     vkc.has_feedback_loop = has_fl && has_fld && ffl.attachmentFeedbackLoopLayout && ffld.attachmentFeedbackLoopDynamicState;
-    if (!vkc.has_feedback_loop) LOG("no attachment feedback loops: textures that are attachments of their pass read empty");
     vkc.has_local_read = has_lr && flr.dynamicRenderingLocalRead;
+    // Without the extensions (AMD's driver has the layout but not the dynamic state that shader objects need) a target
+    // sampled while bound stays attached in GENERAL, as DXVK does for feedback loops; with local read the barrier
+    // inside the pass orders it. TOTK_VK_FB_GENERAL=0: such textures read empty instead (the old behaviour);
+    // TOTK_VK_FB_GENERAL=depth: only depth targets (colour ones read empty).
+    const char *fbg = getenv("TOTK_VK_FB_GENERAL");
+    vkc.fb_layout = vkc.has_feedback_loop ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
+                  : !(fbg && !strcmp(fbg, "0")) ? VK_IMAGE_LAYOUT_GENERAL : 0;
+    vkc.fb_color = vkc.has_feedback_loop || !(fbg && !strcmp(fbg, "depth"));
+    if (!vkc.has_feedback_loop)
+        LOG("no attachment feedback loops: %s", !vkc.fb_layout ? "textures that are attachments of their pass read empty"
+                                              : vkc.fb_color ? "textures that are attachments of their pass are sampled in GENERAL"
+                                                             : "depth attachments of their pass are sampled in GENERAL, colour ones read empty");
     if (vkc.has_feedback_loop && !vkc.has_local_read) LOG("no barriers inside a pass: a draw sampling its own target may miss earlier draws' writes");
     // TOTK_VK_ROBUST=1 (development): bounds-checked buffer access, to tell a shader's out-of-range access from other
     // causes of a lost device
