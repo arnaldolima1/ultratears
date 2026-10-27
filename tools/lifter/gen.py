@@ -128,6 +128,13 @@ class Module:
         if r is not None and s is not None:
             self.stats['jumptables_single_target_rescanned'] += 1
             return sorted(set(r) | set(s))
+        if s is None and r is not None and len(set(r)) <= 1:
+            # [TOTK] A single target the image scan cannot confirm comes from an emulation that read the table at a
+            # scratch address: the table register is set once, far above the br, and reused in between (main 0x8006eb84c,
+            # the save-load crash "no function at 8006eb850": 1 of its 7 targets). Every instruction of the function is
+            # a target then ('all', as for any unresolved table) instead of that one guess. 3 brs in main.
+            self.stats['jumptables_single_unconfirmed'] += 1
+            return None
         return r if r is not None else s
 
     def _jump_table_scan(self, br_pc, entry, end):
