@@ -182,6 +182,7 @@ static int create_device(void) {
         {VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME, &ffld, &has_fld},
         // ...and a draw that samples a target earlier draws of the pass wrote waits for them inside the pass
         {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME, &flr, &has_lr},
+        {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, NULL, &vkc.has_memory_budget},   // the memory log line
         // development (TOTK_VK_CHECKPOINTS=1): the markers a lost device reached
         {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, NULL, &vkc.has_checkpoints},
         // ...and written by the GPU to host memory, which outlives the device (the NVIDIA driver gave 0 checkpoints, 2026-10-27)

@@ -10,7 +10,7 @@
 
 #define VK_FN_GLOBAL(X) X(vkCreateInstance) X(vkEnumerateInstanceLayerProperties) X(vkEnumerateInstanceExtensionProperties)
 #define VK_FN_INSTANCE(X) X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) \
-    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceMemoryProperties2)\
     X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceFormatProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
@@ -64,6 +64,7 @@ typedef struct {
     int has_local_read;      // VK_KHR_dynamic_rendering_local_read: barriers inside a pass (draws reading what earlier draws wrote)
     VkPhysicalDeviceDescriptorBufferPropertiesEXT db;   // VK_EXT_descriptor_buffer: descriptor sizes, alignment, ranges
     int has_checkpoints;     // TOTK_VK_CHECKPOINTS=1: VK_NV_device_diagnostic_checkpoints (where a lost device stopped)
+    int has_memory_budget;   // VK_EXT_memory_budget: the memory this process uses per heap (the memory log line)
     int has_buffer_marker;   // TOTK_VK_CHECKPOINTS=1: VK_AMD_buffer_marker (the same, written by the GPU to host memory)
 } VkContext;
 extern VkContext vkc;

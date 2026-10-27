@@ -96,6 +96,67 @@ static void VKAPI_CALL count_barrier(VkCommandBuffer cb, const VkDependencyInfo 
 }
 static void VKAPI_CALL count_begin(VkCommandBuffer cb, const VkRenderingInfo *r) { vkb_cnt_add(g_n_passes, 1); g_real_begin(cb, r); }
 
+// Memory allocated through Vulkan (the memory log line every 300 presents), by kind: device-local (video memory),
+// host memory, game memory imported (takes no video memory). Counted by wrapping vkAllocateMemory / vkFreeMemory.
+enum { MK_DEVICE, MK_HOST, MK_IMPORT, MK_N };
+static PFN_vkAllocateMemory g_real_alloc;
+static PFN_vkFreeMemory g_real_free;
+static _Atomic uint64_t g_mem_bytes[MK_N], g_mem_peak[MK_N], g_mem_count[MK_N];
+enum { MEMTAB = 1 << 16 };
+static struct { uint64_t mem, size; int kind; } *g_memtab;   // open addressing by handle; mem 0 free, 1 removed
+static pthread_mutex_t g_memtab_mu = PTHREAD_MUTEX_INITIALIZER;
+static VkResult VKAPI_CALL count_alloc(VkDevice d, const VkMemoryAllocateInfo *ai, const VkAllocationCallbacks *a, VkDeviceMemory *m) {
+    VkResult r = g_real_alloc(d, ai, a, m);
+    if (r != VK_SUCCESS) return r;
+    int kind = MK_HOST;
+    for (const VkBaseInStructure *p = ai->pNext; p; p = p->pNext) if (p->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) kind = MK_IMPORT;
+    if (kind != MK_IMPORT && ai->memoryTypeIndex < vkc.memory.memoryTypeCount &&
+        (vkc.memory.memoryHeaps[vkc.memory.memoryTypes[ai->memoryTypeIndex].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) kind = MK_DEVICE;
+    uint64_t n = atomic_fetch_add(&g_mem_bytes[kind], ai->allocationSize) + ai->allocationSize, pk = atomic_load(&g_mem_peak[kind]);
+    while (n > pk && !atomic_compare_exchange_weak(&g_mem_peak[kind], &pk, n)) {}
+    atomic_fetch_add(&g_mem_count[kind], 1);
+    pthread_mutex_lock(&g_memtab_mu);
+    if (!g_memtab && !(g_memtab = calloc(MEMTAB, sizeof *g_memtab))) die("memory table");
+    uint64_t h = (uint64_t)(uintptr_t)*m;
+    for (uint32_t i = (uint32_t)(h * 0x9E3779B97F4A7C15ull >> 48), k = 0; k < MEMTAB; i = (i + 1) & (MEMTAB - 1), k++)
+        if (g_memtab[i].mem <= 1) { g_memtab[i].mem = h; g_memtab[i].size = ai->allocationSize; g_memtab[i].kind = kind; break; }
+    pthread_mutex_unlock(&g_memtab_mu);
+    return r;
+}
+static void VKAPI_CALL count_free(VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *a) {
+    if (m && g_memtab) {
+        uint64_t h = (uint64_t)(uintptr_t)m;
+        pthread_mutex_lock(&g_memtab_mu);
+        for (uint32_t i = (uint32_t)(h * 0x9E3779B97F4A7C15ull >> 48), k = 0; k < MEMTAB && g_memtab[i].mem; i = (i + 1) & (MEMTAB - 1), k++)
+            if (g_memtab[i].mem == h) {
+                atomic_fetch_sub(&g_mem_bytes[g_memtab[i].kind], g_memtab[i].size);
+                atomic_fetch_sub(&g_mem_count[g_memtab[i].kind], 1);
+                g_memtab[i].mem = 1;
+                break;
+            }
+        pthread_mutex_unlock(&g_memtab_mu);
+    }
+    g_real_free(d, m, a);
+}
+// The memory log line: what the driver counts for this process per heap (VK_EXT_memory_budget) and what we allocated.
+static void memory_log(void) {
+    char drv[256] = "";
+    if (vkc.has_memory_budget) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 p = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &b};
+        vk.vkGetPhysicalDeviceMemoryProperties2(vkc.gpu, &p);
+        int n = 0;
+        for (uint32_t h = 0; h < p.memoryProperties.memoryHeapCount && n < (int)sizeof drv - 64; h++)
+            n += snprintf(drv + n, sizeof drv - (size_t)n, " heap %u%s %.0f of %.0f MiB;", h,
+                          p.memoryProperties.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (video)" : "",
+                          b.heapUsage[h] / 1048576.0, b.heapBudget[h] / 1048576.0);
+    }
+    VLOG("memory: driver (this process, used of budget):%s ours: video memory %.0f MiB in %llu (peak %.0f), of it pool copies %.0f; "
+         "host %.0f MiB (peak %.0f); game memory imported %.0f MiB", drv[0] ? drv : " -", atomic_load(&g_mem_bytes[MK_DEVICE]) / 1048576.0,
+         (unsigned long long)atomic_load(&g_mem_count[MK_DEVICE]), atomic_load(&g_mem_peak[MK_DEVICE]) / 1048576.0, vkb_shadow_bytes() / 1048576.0,
+         atomic_load(&g_mem_bytes[MK_HOST]) / 1048576.0, atomic_load(&g_mem_peak[MK_HOST]) / 1048576.0, atomic_load(&g_mem_bytes[MK_IMPORT]) / 1048576.0);
+}
+
 static void backend_init(void) {
     if (g_ok >= 0) return;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -112,6 +173,8 @@ static void backend_init(void) {
         if (ok) {
             g_real_barrier = vk.vkCmdPipelineBarrier2; vk.vkCmdPipelineBarrier2 = count_barrier;
             g_real_begin = vk.vkCmdBeginRendering; vk.vkCmdBeginRendering = count_begin;
+            g_real_alloc = vk.vkAllocateMemory; vk.vkAllocateMemory = count_alloc;
+            g_real_free = vk.vkFreeMemory; vk.vkFreeMemory = count_free;
         }
         vkb_state_reset();
         VLOG("replayer %s", ok ? "on Vulkan" : "without a GPU: submissions complete at once");
@@ -1857,6 +1920,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                 pwp = g_wb_pages; pwk = g_wb_kept_pages; pwb = g_wb_byte_pages;
                 pin = g_sh_in; pib = g_sh_in_bytes; pob = g_sh_out_bytes; pdf = g_sh_deferred; psc = g_sh_scan_ns;
             }
+            memory_log();
             VLOG("per frame: GPU %.1f ms (whole submissions), recording waited %.1f ms for a free command slot",
                  (double)(g_gpu_ns - pgpu) / 1e6 / f, (double)(g_slot_wait_ns - pwait) / 1e6 / f);
             pgpu = g_gpu_ns; pwait = g_slot_wait_ns;
