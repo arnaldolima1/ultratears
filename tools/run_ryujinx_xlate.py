@@ -29,9 +29,11 @@ def main():
     ap.add_argument('--quiet', action='store_true')
     a = ap.parse_args()
     lines = (a.dir / 'jobs.jsonl').read_text().splitlines()
-    if a.new_only:   # only shaders without a translation yet (the comparison's outputs stay)
-        lines = [l for l in lines if not (a.dir / 'ryujinx' / (json.loads(l)['job']['key'] + '.spv')).exists()]
     (a.dir / 'ryujinx').mkdir(exist_ok=True)
+    if a.new_only:   # only shaders without a translation yet (the comparison's outputs stay)
+        # (one listing, not a lookup per shader: exFAT has no directory index, ~28,000 of them took minutes cold)
+        have = set(os.listdir(a.dir / 'ryujinx'))
+        lines = [l for l in lines if json.loads(l)['job']['key'] + '.spv' not in have]
     env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1',
                DOTNET_CLI_HOME=str(ROOT / 'third_party/dotnet-home'))
     if XLATE is None:

@@ -22,8 +22,6 @@ def main():
     procs = []
     for name, base in MODULES.items():
         (out / name).mkdir(parents=True, exist_ok=True)
-        for old in (out / name).glob('*.c'):   # a new lift writes every file again: none of the last one may stay
-            old.unlink(missing_ok=True)   # (macOS on exFAT: a ._ twin goes with its file)
         log = open(out / f'{name}.log', 'w')
         procs.append((name, log, subprocess.Popen(
             [sys.executable, str(ROOT / 'tools/lifter/gen.py'), name, str(exefs / name), hex(base), str(out / name),

@@ -43,13 +43,24 @@ def pack(folder, out=None):
 
 
 def stale(folder, out=None):
-    """True if the pack is missing or older than a translated shader (the translation added or rewrote one)."""
+    """True if the pack is missing or its keys are not the translated ones (the translation added one). A shader
+    rewritten in place is not seen: tools/setup.py packs again after a full translation. One listing and the pack's
+    index only, no stat per file: exFAT has no directory index, and ~57,000 lookups took a minute cold."""
     folder = pathlib.Path(folder)
     out = pathlib.Path(out) if out else folder / 'shaders.pack'
-    if not out.is_file():
+    try:
+        with open(out, 'rb') as f:
+            head = f.read(16)
+            if head[:8] != MAGIC:
+                return True
+            count = struct.unpack('<I', head[8:12])[0]
+            index = f.read(48 * count)
+    except OSError:
         return True
-    t = out.stat().st_mtime
-    return any(e.stat().st_mtime > t for e in os.scandir(folder) if e.name.endswith(('.spv', '.res.json')))
+    packed = {index[i:i + 32].hex() for i in range(0, len(index), 48)}
+    names = set(os.listdir(folder))
+    keys = {n[:-4] for n in names if n.endswith('.spv') and KEY.fullmatch(n[:-4]) and n[:-4] + '.res.json' in names}
+    return keys != packed
 
 
 def main():

@@ -161,6 +161,12 @@ def main():
             game_objs.append(obj)
     if not game_objs:
         sys.exit(f'no generated C in {gen}: run tools/gen_game.py first')
+    keep = set(game_objs)
+    for module in ('main', 'subsdk0', 'sdk'):   # objects of chunks the lift no longer writes
+        for o in (build / 'game' / module).glob('*.o'):
+            if not o.name.startswith('._') and f'build/game/{module}/{o.name}' not in keep:
+                o.unlink(missing_ok=True)
+                pathlib.Path(f'{o}.d').unlink(missing_ok=True)
     exe = f'UltraTears{toolchain.EXE}' if a.target == 'ultratears' else f'build/{a.target}{toolchain.EXE}'   # the game: in the game folder
     lines.append(f'build {exe}: link {" ".join(objs + game_objs)}')
     lines.append(f'  pdb = build/{pathlib.Path(exe).stem}.pdb')

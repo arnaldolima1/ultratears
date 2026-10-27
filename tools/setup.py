@@ -464,7 +464,7 @@ def step_shaders(dump, state, cpus):
         'translating the shaders')
     state['shaders-xlate'] = xlate
     from pack_shaders import pack, stale   # one file instead of two per shader (src/gfx/vkb_shader.c reads it first)
-    if stale(out / 'ryujinx'):
+    if not new_only or stale(out / 'ryujinx'):   # (a full translation may have rewritten any of them)
         n, size = pack(out / 'ryujinx')
         say(f'  {n} shaders packed into data\\shaders\\ryujinx\\shaders.pack ({size / 2**20:.0f} MiB)')
     return 'done'

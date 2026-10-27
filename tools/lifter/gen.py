@@ -694,6 +694,11 @@ def table_base(m, i, reg, window=40):
     return False
 
 
+def anchor(a):
+    """About one function in 64, chosen by its address alone: where a file may end once it has a third of its size."""
+    return ((a >> 2) * 0x9E3779B97F4A7C15 & (1 << 64) - 1) >> 58 == 0
+
+
 def write_if_changed(path, text):
     """Leaves unchanged chunks untouched so make only recompiles what a patch affected."""
     try:
@@ -791,6 +796,7 @@ def main():
     if args.limit:
         order = order[:args.limit]
     nchunks = 0
+    written = set()
     ci = 0
     pending = None  # (address, lines, refs) of a big function that starts the next file
     while ci < len(order) or pending:
@@ -814,9 +820,13 @@ def main():
             size += n
             fns.append(a)
             refs |= r
-            if n > args.big_fn:
+            if n > args.big_fn or (size >= args.chunk_bytes // 3 and anchor(a)):
                 break
-        path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
+        # Named by the first function's offset, ended at anchor addresses: a change to one function rewrites its file
+        # only, not every file after it (sizes or numbering shifting), so ninja recompiles just that one.
+        name = f'{args.name}_{fns[0] - args.base:07x}.c'
+        written.add(name)
+        path = os.path.join(args.outdir, name)
         text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
         text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
@@ -825,9 +835,8 @@ def main():
         nchunks += 1
         # (the start screen's setup reads these for its progress bar: runtime/gamebuild.c)
         print(f'{args.name}: progress {ci}/{len(order)} files {nchunks}', file=sys.stderr, flush=True)
-    for fn in os.listdir(args.outdir):  # an earlier run's extra chunks
-        mm = re.fullmatch(re.escape(args.name) + r'_(\d+)\.c', fn)
-        if mm and int(mm.group(1)) >= nchunks:
+    for fn in os.listdir(args.outdir):  # an earlier run's chunks that are gone (and the old numbered names)
+        if re.fullmatch(re.escape(args.name) + r'_[0-9a-f]+\.c', fn) and fn not in written:
             os.remove(os.path.join(args.outdir, fn))
     import io
     with io.StringIO() as f:
