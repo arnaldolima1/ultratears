@@ -424,8 +424,8 @@ static void snap_take(const pool_ent *p, uint64_t addr, uint64_t len) {
     s->owned = 1;
     g_snap_bytes += len;
 }
-static void wb_add(pool_ent *p, uint64_t addr, uint64_t len) {   // a GPU write to p's copy
-    p->wb_sub = g_fence + 1;
+static void wb_add(pool_ent *p, uint64_t addr, uint64_t len) {   // a GPU write to p's copy (g_pool_mu written, or read + g_wb_mu)
+    __atomic_store_n(&p->wb_sub, g_fence + 1, __ATOMIC_RELAXED);
     snap_take(p, addr, len);
     VkDeviceSize o = addr - p->base;
     if (g_nwb && g_wb[g_nwb - 1].dst == p->buf && o <= g_wb[g_nwb - 1].doff + g_wb[g_nwb - 1].n && g_wb[g_nwb - 1].doff <= o + len) {
@@ -595,19 +595,30 @@ static void shadow_presync(void) {
     vkb_rw_write_end(&g_pool_mu);
 }
 static pool_ent *pool_find_mut(uintptr_t addr, uint64_t len);
+// The GPU writes of this submission (g_wb, g_snaps and the slot's "before" buffer) when the pool table is only read:
+// a write to a pool already current in the submission is recorded under the read lock and this one, so the recording
+// threads do not wait for each other's uniform updates and stores (the write lock is for bringing a copy up to date).
+static pthread_mutex_t g_wb_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_pool_use_n[3];   // the per-frame log line: write lock to update a copy / for a write / writes under the read lock
 void vkb_pool_use(uint64_t addr, uint64_t len, int write) {
     if (g_ok != 1 || !addr || !len || !vkb_shadow_on()) return;
     uint64_t sub = g_fence + 1;
-    if (!write) {   // the common case: a read of a pool already current in this submission
-        vkb_rw_read(&g_pool_mu, LK_POOLS);
-        pool_ent *p = pool_find_mut((uintptr_t)addr, len);
-        int done = !p || p->no_shadow || p->sync_sub == sub;
-        if (p) __atomic_store_n(&p->used_sub, sub, __ATOMIC_RELAXED);
-        vkb_rw_read_end(&g_pool_mu);
-        if (done) return;
-    }
-    vkb_rw_write(&g_pool_mu, LK_POOLS);
+    vkb_rw_read(&g_pool_mu, LK_POOLS);   // the common cases: a pool already current in this submission, or not copied
     pool_ent *p = pool_find_mut((uintptr_t)addr, len);
+    int done = !p || p->no_shadow || (p->sync_sub == sub && !write);
+    if (p) __atomic_store_n(&p->used_sub, sub, __ATOMIC_RELAXED);
+    if (!done && write && p->sync_sub == sub) {
+        pthread_mutex_lock(&g_wb_mu);
+        wb_add(p, addr, len);
+        pthread_mutex_unlock(&g_wb_mu);
+        atomic_fetch_add_explicit(&g_pool_use_n[2], 1, memory_order_relaxed);
+        done = 1;
+    }
+    vkb_rw_read_end(&g_pool_mu);
+    if (done) return;
+    atomic_fetch_add_explicit(&g_pool_use_n[write ? 1 : 0], 1, memory_order_relaxed);
+    vkb_rw_write(&g_pool_mu, LK_POOLS);
+    p = pool_find_mut((uintptr_t)addr, len);   // the table may have changed between the locks
     if (p) {
         p->used_sub = sub;
         // threads recording: the copies go into the prologue, before every chunk (no pass to end)
@@ -1548,12 +1559,14 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                 pc = c; pb = b; pn = ns; ph = h; pd = d;
             }
             if (vkb_shadow_on()) {
-                static uint64_t pin, pib, pob, pdf, psc, pwp, pwk, pwb;
+                static uint64_t pin, pib, pob, pdf, psc, pwp, pwk, pwb, pu0, pu1, pu2;
                 VLOG("per frame: pool copies %.1f MiB of device memory; in %.0f copies %.2f MiB, back %.2f MiB, "
-                     "left in game memory in a pass %.0f, write watch %.2f ms; pages copied back %.0f, left to CPU writes %.1f, merged by bytes %.1f", (double)vkb_shadow_bytes() / 1048576.0,
+                     "left in game memory in a pass %.0f, write watch %.2f ms; pages copied back %.0f, left to CPU writes %.1f, merged by bytes %.1f; pool uses under the write lock %.0f to update + %.0f writes, writes under the read lock %.0f", (double)vkb_shadow_bytes() / 1048576.0,
                      (double)(g_sh_in - pin) / f, (double)(g_sh_in_bytes - pib) / 1048576.0 / f, (double)(g_sh_out_bytes - pob) / 1048576.0 / f,
                      (double)(g_sh_deferred - pdf) / f, (double)(g_sh_scan_ns - psc) / 1e6 / f,
-                     (double)(g_wb_pages - pwp) / f, (double)(g_wb_kept_pages - pwk) / f, (double)(g_wb_byte_pages - pwb) / f);
+                     (double)(g_wb_pages - pwp) / f, (double)(g_wb_kept_pages - pwk) / f, (double)(g_wb_byte_pages - pwb) / f,
+                     (double)(g_pool_use_n[0] - pu0) / f, (double)(g_pool_use_n[1] - pu1) / f, (double)(g_pool_use_n[2] - pu2) / f);
+                pu0 = g_pool_use_n[0]; pu1 = g_pool_use_n[1]; pu2 = g_pool_use_n[2];
                 pwp = g_wb_pages; pwk = g_wb_kept_pages; pwb = g_wb_byte_pages;
                 pin = g_sh_in; pib = g_sh_in_bytes; pob = g_sh_out_bytes; pdf = g_sh_deferred; psc = g_sh_scan_ns;
             }
@@ -1841,13 +1854,19 @@ uint64_t mtl_sub_commit(void) {
 // command buffer (GPU start time, captured uniforms, the move into the prologue's layouts), the prologue, and for each
 // chunk its move and itself, then the end (copies back).
 // [temporary] Mirrors of written storage buffers are not made (one thread only); TOTK_VK_RECORD_THREADS=1 records as before.
-enum { MT_DRAWS = 400 };
+// A pass longer than MT_SPLIT draws (the Great Sky Island's G-buffer pass: ~2100 draws, one chunk of 12 of the
+// submission's 14 ms while the other threads waited) is cut inside: the chunk ends its pass and the next one begins it
+// again with LOAD (every pass loads its targets), after the barrier between chunks. Depth-only passes (the shadow maps,
+// ~1100 draws) are not cut: with them cut the sun's shadows went missing in one autotest of two (2026-10-27, not
+// understood yet).
+enum { MT_DRAWS = 400, MT_SPLIT = 500 };
 struct mt_chunk {
     int h0, h1; const uint8_t *p0, *p1;   // its first command, and the one after its last (h1 == the handle count: the end)
     uint64_t seq;                         // the position before its first command
     void *state; p_set_rt rt; int render_off; int64_t stride;   // the state it starts in
     VkCommandBuffer cb;
     vkb_trk trk;
+    uint64_t draws, ns;                   // the log line: its draws and dispatches, its recording time
 };
 static mt_chunk g_ch[MT_MAXCH];
 static int g_nch;
@@ -1960,7 +1979,8 @@ static void mt_record(mt_chunk *c) {
     vkb_trk_set(NULL);
     t_recording = 0;
     t_cb = VK_NULL_HANDLE;
-    vkb_cnt_add(g_mt_rec_ns, runtime_now_ns() - t0);
+    c->ns = runtime_now_ns() - t0;
+    vkb_cnt_add(g_mt_rec_ns, c->ns);
 }
 static int mt_take(void) {   // the next chunk cut and not taken, or -1
     pthread_mutex_lock(&g_mt_mu);
@@ -2005,6 +2025,7 @@ static void chunk_open(int hidx, const uint8_t *p) {   // a chunk starts at p, i
 static void chunk_close(int hidx, const uint8_t *p) {   // the open chunk ends before p: recording threads may take it
     mt_chunk *c = &g_ch[g_nch];
     c->h1 = hidx; c->p1 = p;
+    c->draws = g_mt_draws;
     pthread_mutex_lock(&g_mt_mu);
     g_mt_avail = ++g_nch;
     pthread_cond_broadcast(&g_mt_cv);
@@ -2013,7 +2034,8 @@ static void chunk_close(int hidx, const uint8_t *p) {   // the open chunk ends b
 static int walk_op(const uint8_t *p, int hidx) {   // before a command at depth 0: a new chunk at a render target change
     op_hdr h;
     memcpy(&h, p, sizeof h);
-    if (h.op == OP_SET_RT && g_mt_draws >= MT_DRAWS && g_nch < MT_MAXCH - 1) {
+    int split = (h.op == OP_DRAW || h.op == OP_DRAW_IDX) && g_mt_draws >= MT_SPLIT && g_rt.n > 0;   // inside a pass with colour targets
+    if (((h.op == OP_SET_RT && g_mt_draws >= MT_DRAWS) || split) && g_nch < MT_MAXCH - 1) {
         chunk_close(hidx, p);
         chunk_open(hidx, p);
     }
@@ -2083,7 +2105,7 @@ static void glue(VkCommandBuffer cb, vkb_trk *t) {
 
 void vkb_mt_submit(const uint64_t *h, int n) {   // after mtl_sub_begin and the uniform capture; commits
     uint64_t t0 = runtime_now_ns();
-    static uint64_t walk_ns, wall_ns, subs, chunks, said_at, glue_images;
+    static uint64_t walk_ns, wall_ns, subs, chunks, said_at, glue_images, longest_ns, longest_draws;
     static int started;
     if (!started) {
         started = 1;
@@ -2141,14 +2163,19 @@ void vkb_mt_submit(const uint64_t *h, int n) {   // after mtl_sub_begin and the 
     g_mt_nlist = 0;
     wall_ns += runtime_now_ns() - t0;
     subs++; chunks += (uint64_t)g_nch;
+    {   // the longest chunk: the submission waits for it
+        uint64_t mx = 0, md = 0;
+        for (int i = 0; i < g_nch; i++) if (g_ch[i].ns > mx) { mx = g_ch[i].ns; md = g_ch[i].draws; }
+        longest_ns += mx; longest_draws += md;
+    }
     if (subs >= said_at + 600) {   // the log line: where a submission's recording time goes
         said_at = subs;
         static uint64_t prev_rec;
         uint64_t rec = vkb_cnt_sum(g_mt_rec_ns);
         VLOG("recording threads: per submission %.1f ms until submitted (walk %.1f ms), chunks %.1f, chunk recording %.1f ms in all "
-             "threads, images moved between chunks %.0f", wall_ns / 1e6 / 600, walk_ns / 1e6 / 600, chunks / 600.0,
-             (rec - prev_rec) / 1e6 / 600, glue_images / 600.0);
-        prev_rec = rec; wall_ns = walk_ns = chunks = glue_images = 0;
+             "threads, the longest chunk %.1f ms (%.0f draws), images moved between chunks %.0f", wall_ns / 1e6 / 600, walk_ns / 1e6 / 600,
+             chunks / 600.0, (rec - prev_rec) / 1e6 / 600, longest_ns / 1e6 / 600, longest_draws / 600.0, glue_images / 600.0);
+        prev_rec = rec; wall_ns = walk_ns = chunks = glue_images = longest_ns = longest_draws = 0;
     }
 }
 
