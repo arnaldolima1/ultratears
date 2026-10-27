@@ -123,6 +123,10 @@ class Module:
         # replaced by the entries read from the image. (Adding the scanned entries to every table instead put
         # trailing data that looks like entries into 1619 of main's 2367 tables.)
         if r is not None and len(set(r)) > 1:
+            v = self._jump_table_variants(br_pc, entry, end)
+            if v and not set(v) <= set(r):
+                self.stats['jumptables_variants'] += 1
+                return sorted(set(r) | set(v))
             return r
         s = self._jump_table_scan(br_pc, entry, end)
         if r is not None and s is not None:
@@ -136,6 +140,87 @@ class Module:
             self.stats['jumptables_single_unconfirmed'] += 1
             return None
         return r if r is not None else s
+
+    def _jump_table_variants(self, br_pc, entry, end):
+        """[fork] One br, several tables: the table register is set by adrp + add at more than one place in the function,
+        each path picking the table of its own variant (main 0x8015b8d30: x20 = 0x802cfe060 / 0x802cfe6d2 / 0x802cfe74a
+        for `ldrh w23, [x20, x18, lsl #1]`). The emulation followed one path and found 14 of the targets; an index of
+        another variant reached rt_dispatch in the middle of the function ("no function at 8015b9fb0"). Every table is
+        read, each up to the next one's start (they are laid out back to back), or up to an entry outside the function."""
+        shape = self._jump_table_shape(br_pc, entry)
+        if shape is None:
+            return None
+        base, size, signed, shift, table_reg = shape
+        tables, page = set(), {}
+        for a in range(entry, br_pc, 4):
+            w = self.word(a)
+            rd = w & 31
+            if f'x{rd}' != table_reg:
+                continue
+            if (w & 0x9F000000) == 0x90000000:   # adrp
+                imm = ((w >> 29) & 3) | (((w >> 5) & 0x7FFFF) << 2)
+                if imm & (1 << 20):
+                    imm -= 1 << 21
+                page[rd] = (a & ~0xFFF) + (imm << 12)
+            elif (w & 0xFFC00000) == 0x91000000 and ((w >> 5) & 31) == rd and rd in page:   # add xd, xd, #imm
+                tables.add(page[rd] + ((w >> 10) & 0xFFF))
+            else:
+                page.pop(rd, None)
+        if len(tables) < 2:
+            return None
+        order = sorted(tables)
+        lo, hi = self.base, self.base + len(self.nso.image)
+        targets = set()
+        for i, table in enumerate(order):
+            stop = order[i + 1] if i + 1 < len(order) else table + 4096 * size
+            for at in range(table, stop, size):
+                if at + size > hi or at < lo:
+                    break
+                raw = int.from_bytes(self.nso.image[at - self.base:at - self.base + size], 'little', signed=signed)
+                t = base + (raw << shift)
+                if not (entry <= t < end) or t % 4:
+                    break
+                targets.add(t)
+        return sorted(targets) if targets else None
+
+    def _jump_table_shape(self, br_pc, entry):
+        """The table form at br_pc: (base, entry size, signed, shift, table register) of `adr xB, base; ldr{b,h,sw} wO,
+        [xT, xI, ...]; add xD, xB, wO, {lsl,sxt*} #k; br xD`, or None."""
+        import capstone
+        if not hasattr(self, '_cs'):
+            self._cs = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+            self._cs.detail = True
+        cs = self._cs
+        insns = {}
+        a = br_pc - 4
+        while a >= entry and br_pc - a <= 4 * 24:
+            got = list(cs.disasm(struct.pack('<I', self.word(a)), a))
+            if not got:
+                return None
+            insns[a] = got[0]
+            a -= 4
+        rn = bits(self.word(br_pc), 5, 5)
+        add = next((i for _, i in sorted(insns.items(), reverse=True) if i.mnemonic == 'add' and len(i.operands) == 3
+                    and i.reg_name(i.operands[0].reg) == f'x{rn}'), None)
+        if add is None or add.operands[2].type != capstone.arm64.ARM64_OP_REG:
+            return None
+        base_reg, off_reg = add.reg_name(add.operands[1].reg), add.reg_name(add.operands[2].reg)
+        shift = add.operands[2].shift.value if add.operands[2].shift.type else 0
+
+        def last_write(reg, before):
+            for x, i in sorted(insns.items(), reverse=True):
+                if x < before and i.operands and i.operands[0].type == capstone.arm64.ARM64_OP_REG and i.reg_name(i.operands[0].reg) == reg:
+                    return i
+            return None
+        b = last_write(base_reg, add.address)
+        load = last_write(off_reg.replace('x', 'w'), add.address) or last_write(off_reg.replace('w', 'x'), add.address)
+        if b is None or b.mnemonic != 'adr' or load is None or load.mnemonic not in ('ldrb', 'ldrh', 'ldrsb', 'ldrsh', 'ldrsw', 'ldr'):
+            return None
+        mem = load.operands[1]
+        if mem.type != capstone.arm64.ARM64_OP_MEM or not mem.mem.index:
+            return None
+        size = {'ldrb': 1, 'ldrsb': 1, 'ldrh': 2, 'ldrsh': 2, 'ldrsw': 4, 'ldr': 4}[load.mnemonic]
+        return b.operands[1].imm, size, load.mnemonic.startswith('ldrs'), shift, load.reg_name(mem.mem.base)
 
     def _jump_table_scan(self, br_pc, entry, end):
         """[TOTK] A table whose bounds check the compiler hoisted far from the br (main: functions with thousands of
