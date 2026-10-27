@@ -1529,6 +1529,13 @@ NVN(nvnCommandBufferSetRasterizerDiscard, void, NVNcommandBuffer *c, uint32_t e)
 static uint64_t g_frame;
 int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
 static _Atomic int g_diag_env_once = -1;
+// Primitive restart: TOTK draws terrain as triangle strips split by the all-ones index. Not recorded before (the Metal
+// port restarts always), Vulkan drew the split as a vertex 65535 past the base: the ground torn into huge wedges (L18).
+// Vulkan restarts only at the all-ones index of the index type; other indices are reported.
+NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t e, int index) {
+    if (B(e) && index != -1 && index != 0xffff && index != 0xff) { static int once; if (!once++) LOG("[warning] SetPrimitiveRestart index %#x: Vulkan restarts only at the all-ones index", index); }
+    REC(c, OP_PRIM_RESTART, p_flag)->value = B(e) != 0;
+}
 static const char *bindprog_env(void) { return getenv("TOTK_BINDPROG_LOG"); }
 static int diag_env_once_on(void) {
     int v = atomic_load_explicit(&g_diag_env_once, memory_order_relaxed);

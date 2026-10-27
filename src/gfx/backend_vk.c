@@ -1748,7 +1748,7 @@ static int exec_ops(const uint8_t *p, int depth, int mode, int hidx, const mt_ch
         case OP_COPY_T2T: if (g_ok == 1) vkb_copy_tex_tex((const p_copy_t2t *)a); break;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL:
         case OP_POLY_OFFSET: case OP_BLEND_COLOR: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO:
-        case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_IMG: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD:
+        case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_IMG: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
             vkb_state(h.op, a);
             break;
         case OP_DRAW: case OP_DRAW_IDX:
@@ -2057,7 +2057,7 @@ static void walk_command(uint32_t op, const uint8_t *a) {
     case OP_SET_RT: memcpy(&g_rt, a, sizeof g_rt); break;
     case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL:
     case OP_POLY_OFFSET: case OP_BLEND_COLOR: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO:
-    case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_IMG: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD:
+    case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_IMG: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
         vkb_state(op, a);
         break;
     case OP_DRAW: case OP_DRAW_IDX:

@@ -130,7 +130,7 @@ static __thread struct {
     uint32_t vattr[16]; int nvattr; vs_st vstream[16]; int nvstream; NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][18], ssbo[6][16];
     uint64_t tex[6][32], img[6][8];
-    int depth_clamp, raster_discard;
+    int depth_clamp, raster_discard, prim_restart;
     const char *bad_key;   // the unsupported shader of a program that cannot be drawn (audit)
     int64_t copy_stride;
 } S;   // this recording thread's (vkb_mt.c gives each chunk the state at its start)
@@ -213,6 +213,7 @@ void vkb_state(uint32_t op, const uint8_t *a) {
     }
     case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_flag *)a)->value; break;
     case OP_RASTER_DISCARD: S.raster_discard = ((const p_flag *)a)->value; break;
+    case OP_PRIM_RESTART: S.prim_restart = ((const p_flag *)a)->value; break;
     case OP_COPY_STRIDE: S.copy_stride = ((const p_copy_stride *)a)->stride; break;
     default: break;
     }
@@ -1072,7 +1073,7 @@ static void set_dynamic_state(VkCommandBuffer cb, int ncolor, VkExtent2D ext, Vk
     if (dyn(D_SC, sc, sizeof sc[0] * (size_t)nvp)) vk.vkCmdSetScissorWithCount(cb, (uint32_t)nvp, sc);
     DYN(D_RDISC, VkBool32, S.raster_discard != 0, vk.vkCmdSetRasterizerDiscardEnable(cb, v_));
     DYN(D_TOPO, VkPrimitiveTopology, topo, vk.vkCmdSetPrimitiveTopology(cb, v_));
-    DYN(D_RESTART, VkBool32, VK_FALSE, vk.vkCmdSetPrimitiveRestartEnable(cb, v_));   // [temporary] NVN primitive restart state is not recorded yet
+    DYN(D_RESTART, VkBool32, S.prim_restart != 0, vk.vkCmdSetPrimitiveRestartEnable(cb, v_));
     // polygon state
     uint32_t cull = S.has_poly ? S.poly.cull : 0, front = S.has_poly ? S.poly.front : 1, mode = S.has_poly ? S.poly.mode : 2;
     DYN(D_CULL, VkCullModeFlags, (VkCullModeFlags)cull, vk.vkCmdSetCullMode(cb, v_));
