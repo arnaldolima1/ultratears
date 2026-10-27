@@ -1,0 +1,43 @@
+#22 — Suggestion: pack the translated shaders into one file (data\shaders\ryujinx is ~57k loose files)
+Estado: OPEN   Autor: PashaKagan   Criada: 2026-10-27T03:58:44Z   Atualizada: 2026-10-27T03:58:44Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/22
+
+=== Descrição ===
+**Version:** UltraTears 0.1.0 (commit 3654e1c)
+
+### The situation
+After a build, nearly every file the game needs is already packed into one big file. The shaders are the exception:
+
+| What | Files | Size |
+|---|---|---|
+| RomFS (`data\romfs\romfs.bin` + index) | 2 | 17 GB |
+| Textures (`data\textures\bc7.pack` + `.idx`) | 2 | 7.9 GB |
+| ExeFS | 4 | 45 MB |
+| **Shaders (`data\shaders\ryujinx`)** | **57,375** | 1.7 GB |
+
+That's 28,687 shaders × (`<key>.spv` + `<key>.res.json`), plus `used.txt`.
+
+The loose files are slow to copy, back up, scan with antivirus and sync to cloud storage. I keep the playable files in a separate folder in Dropbox to play on more than one PC, and the shaders are 99.9% of its files but only ~6% of its size. Each small file also wastes part of a disk cluster.
+
+### Suggestion
+Pack them the way the RomFS and the BC7 textures already are: one `shaders.pack` written by the shaders step of `setup.py` (after `run_ryujinx_xlate.py`), with an index in the file:
+
+- header + entry count
+- entries sorted by key: `key[32 bytes binary sha256] | spv offset | spv length | json offset | json length`
+- the blobs
+
+At runtime the change could be small, because loading already goes through one place: `load()` in `src/gfx/vkb_shader.c`, which builds `%s/%s.res.json` and `%s/%s.spv` from `cache_dir()` and calls `read_file()`. For example:
+
+- at first use, if `<cache_dir>/shaders.pack` exists, map it (or read just its index) and binary-search the key;
+- if it's found, take the two blobs from the pack; if not, or there's no pack, fall back to the current loose files, so developer builds and partial caches keep working;
+- `used.txt` stays a loose file, since the game appends to it while it runs (`list_add`).
+
+That turns ~57,000 files into 2. Reads may even get faster, since there's one open handle instead of 2 `fopen`s per shader during prewarm.
+
+`bc7.pack` already works this way, and it shows that one game-written pack syncs fine. So nothing new is needed on that side.
+
+Thanks for the port! (Related: #18, the save-load crash fix.)
+
+=== Comentários ===
+(sem comentários)

@@ -1,0 +1,17 @@
+#19 — No AVX2 for Older CPUs Suport Request
+Estado: OPEN   Autor: ta955995-cmd   Criada: 2026-10-26T19:58:33Z   Atualizada: 2026-10-26T19:58:33Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/19
+
+=== Descrição ===
+Hi, I’m really excited about this project—out of all the ports currently being released, this is the one I’ve been looking forward to the most. However, I have a 3rd-generation processor that doesn’t support AVX2. I’d like to request that support for these CPUs be added in future versions. The *Breath of the Wild* (Savage Wind) port added this support in its alpha 3 release; even with a slower compatibility mode, the game runs quite stably at 30–40 fps. I believe a similar solution could work here as well. I would be very grateful if you could consider adding this in future updates. Thank you so much for your hard work, and have a great day!
+
+My Setup:
+
+GTX 1650
+Xeon E3 1230V2 (I7 3770 Equivalent)
+16 gb ram 
+Windows 11 Os
+
+=== Comentários ===
+(sem comentários)

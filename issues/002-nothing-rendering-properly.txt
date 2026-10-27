@@ -1,0 +1,25 @@
+#2 — Nothing rendering properly
+Estado: OPEN   Autor: kkaylumm   Criada: 2026-10-26T01:59:44Z   Atualizada: 2026-10-26T22:53:47Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/2
+
+=== Descrição ===
+<img width="2560" height="1440" alt="Image" src="https://github.com/user-attachments/assets/992e4a6e-08c4-42e7-98c2-242610d514f8" />
+
+Processor: AMD Ryzen Z2 (3.30 GHz)
+Installed RAM: 32.0 GB (21.8 GB usable)
+Graphics card: AMD Radeon 780M Graphics (10 GB)
+System type: 64-bit operating system, x64-based processor
+
+=== Comentários ===
+--- CRT-TV605 em 2026-10-26T02:43:48Z
+Can confirm, the same happens on a Ryzen 5 6600H with Radeon 660M
+
+--- Sephiroth713 em 2026-10-26T03:15:40Z
+Probably an error with AMD Graphics cards, I have the same problem xd
+
+--- ATH733 em 2026-10-26T12:06:13Z
+Same for 6700xt with 13600k
+
+--- thewerc em 2026-10-26T22:53:47Z
+same with 5600 and 9060xt

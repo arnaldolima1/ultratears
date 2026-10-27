@@ -1,0 +1,234 @@
+PR #25 — feat(shaders): pack the translated shaders into shaders.pack (~57,000 files → 1)
+Estado: OPEN   Autor: PashaKagan   Criado: 2026-10-27T05:11:31Z   Atualizado: 2026-10-27T05:11:31Z
+Branch: shader-pack -> main   +148 -5 em 3 arquivos
+URL: https://github.com/kuraeow/ultratears/pull/25
+
+=== Descrição ===
+Closes #22.
+
+### Why
+After a build, `data\shaders\ryujinx` holds two files per shader, `<key>.spv` + `<key>.res.json`: 57,374 files for 1.4.3, about 1.7 GB. Everything else the game reads is already one big file (`romfs.bin`, `bc7.pack`). Copying, backing up, scanning with antivirus or syncing the game folder (Dropbox, OneDrive…) is dominated by those small files.
+
+### Change
+- **`tools/pack_shaders.py`** (new) writes `data\shaders\ryujinx\shaders.pack`. The layout, little-endian:
+  - `UTSHPK01`, u32 count, u32 0;
+  - entries sorted by key: `{key[32] (binary SHA-256), u64 offset, u32 SPIR-V bytes, u32 reflection bytes}`;
+  - then the data (each SPIR-V followed by its reflection).
+  It writes to `.tmp`, then `os.replace`s it.
+- **`tools/setup.py`**: after `run_ryujinx_xlate.py`, the shaders step packs when the pack is missing or older than a translated shader (`stale()`). A no-op rebuild doesn't rewrite 1.7 GB.
+- **`src/gfx/vkb_shader.c`**: `load()` reads through `read_translation()`.
+  - On first use, `pack_open()` reads the index (1.4 MB).
+  - Lookups use a binary search on the key, and the two blobs come from positioned `ReadFile`s, which are safe from the prewarm threads with no lock.
+  - With no pack, a bad header, or a key that isn't in the pack, it reads the loose files as before. So developer layouts, partial caches and `--new-only` additions keep working.
+  - `used.txt` stays a loose file, since the game appends to it.
+
+The loose files stay in the builder folder, because `--new-only` adds to them. A player copying the game somewhere else needs only `shaders.pack` + `used.txt`.
+
+### Testing (Windows, RTX 4090 laptop, 1.4.3)
+- Rebuild of an existing build folder: the step packed its 28,687 shaders into a 1,720 MiB pack.
+- Played from a copy of the game folder holding only `shaders.pack` + `used.txt` in `data\shaders\ryujinx` (2 files instead of 57,375). The log shows `[vk] shader pack: 28687 shaders in data/shaders/ryujinx/shaders.pack`, no `no translation` messages, a save loaded, and the game ran and exited cleanly.
+- `pack_shaders.py` round trip on a synthetic set (500 shaders + an orphan `.spv` without a reflection, which is skipped): every entry reads back byte-identical, with the index sorted. `stale()` is false right after packing, and true once a `.spv` is newer than the pack.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+=== Arquivos ===
+  src/gfx/vkb_shader.c (+82 -5)
+  tools/pack_shaders.py (+62 -0)
+  tools/setup.py (+4 -0)
+
+=== Comentários ===
+(sem comentários)
+
+=== Revisões ===
+(sem revisões)
+
+=== Diff ===
+diff --git a/src/gfx/vkb_shader.c b/src/gfx/vkb_shader.c
+index 2500525..ccdb760 100644
+--- a/src/gfx/vkb_shader.c
++++ b/src/gfx/vkb_shader.c
+@@ -136,6 +136,85 @@ static const char *cache_dir(void) {
+     return d;
+ }
+ 
++// ---------------- the shader pack (<cache>/shaders.pack, tools/pack_shaders.py) ----------------
++// One file instead of a .spv and a .res.json per shader (~57,000 files: slow to copy, back up and sync). Layout,
++// little-endian: "UTSHPK01", u32 count, u32 0, then count entries sorted by key {u8 key[32] (the SHA-256); u64 offset;
++// u32 SPIR-V bytes; u32 reflection bytes} (the SPIR-V at offset, its reflection right after it), then the data.
++// Without a pack, or for a key not in it, the loose files are read as before.
++typedef struct { uint8_t key[32]; uint64_t off; uint32_t nspv, njson; } pack_entry;
++_Static_assert(sizeof(pack_entry) == 48, "shader pack entry layout");
++static HANDLE g_pack = INVALID_HANDLE_VALUE;
++static pack_entry *g_pack_ix;
++static uint32_t g_pack_n;
++static int read_at(HANDLE h, uint64_t off, void *buf, uint32_t n) {   // positioned read: safe from several threads
++    OVERLAPPED o = {0};
++    o.Offset = (DWORD)off;
++    o.OffsetHigh = (DWORD)(off >> 32);
++    DWORD got = 0;
++    return ReadFile(h, buf, n, &got, &o) && got == n;
++}
++static void pack_open(void) {
++    char path[1024];
++    snprintf(path, sizeof path, "%s/shaders.pack", cache_dir());
++    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (h == INVALID_HANDLE_VALUE) return;
++    uint8_t hd[16];
++    uint32_t n = 0;
++    if (read_at(h, 0, hd, sizeof hd) && !memcmp(hd, "UTSHPK01", 8)) memcpy(&n, hd + 8, 4);
++    pack_entry *ix = n && n < (1u << 24) ? malloc((size_t)n * sizeof *ix) : NULL;
++    if (!ix || !read_at(h, sizeof hd, ix, n * (uint32_t)sizeof *ix)) {
++        VLOG("%s: not a shader pack, the loose files are used", path);
++        free(ix);
++        CloseHandle(h);
++        return;
++    }
++    g_pack = h;
++    g_pack_ix = ix;
++    g_pack_n = n;
++    VLOG("shader pack: %u shaders in %s", n, path);
++}
++static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
++static int pack_read(const char *key, char **json, uint32_t **spv, size_t *nspv) {
++    uint8_t k[32];
++    for (int i = 0; i < 32; i++) {
++        int hi = hexval(key[2 * i]), lo = hi < 0 ? -1 : hexval(key[2 * i + 1]);
++        if (lo < 0) return 0;
++        k[i] = (uint8_t)(hi << 4 | lo);
++    }
++    size_t lo = 0, hi = g_pack_n;
++    while (lo < hi) {
++        size_t mid = lo + (hi - lo) / 2;
++        int c = memcmp(g_pack_ix[mid].key, k, 32);
++        if (c < 0) { lo = mid + 1; continue; }
++        if (c > 0) { hi = mid; continue; }
++        const pack_entry *e = &g_pack_ix[mid];
++        char *s = malloc((size_t)e->nspv + 1), *j = malloc((size_t)e->njson + 1);
++        if (!s || !j || !read_at(g_pack, e->off, s, e->nspv) || !read_at(g_pack, e->off + e->nspv, j, e->njson)) {
++            free(s);
++            free(j);
++            return 0;
++        }
++        s[e->nspv] = 0;
++        j[e->njson] = 0;
++        *spv = (uint32_t *)s;
++        *json = j;
++        *nspv = e->nspv;
++        return 1;
++    }
++    return 0;
++}
++// A shader's translation (SPIR-V) and reflection (JSON), malloc'd and NUL-terminated: from the pack, else the loose files.
++static void read_translation(const char *key, char **json, uint32_t **spv, size_t *nspv) {
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, pack_open);
++    if (g_pack_n && strlen(key) >= 64 && pack_read(key, json, spv, nspv)) return;
++    char path[1024];
++    snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
++    *json = read_file(path, NULL);
++    snprintf(path, sizeof path, "%s/%s.spv", cache_dir(), key);
++    *spv = (uint32_t *)read_file(path, nspv);
++}
++
+ // The translator declares gl_PerVertex with ClipDistance[8] and CullDistance[1]: 9 > maxCombinedClipAndCullDistances (8)
+ // on NVIDIA, though no shader writes the cull distance. The CullDistance member (the block's last) is dropped: its
+ // OpTypeStruct operand, OpMemberName and OpMemberDecorate. Returns the new word count.
+@@ -215,12 +294,10 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t
+ 
+ // Reads the reflection, rewrites the SPIR-V bindings into the universal layout, creates the shader object.
+ static int load(vkb_shader *s, const char *key, int nvn_stage) {
+-    char path[1024];
+-    snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
+-    char *j = read_file(path, NULL);
+-    snprintf(path, sizeof path, "%s/%s.spv", cache_dir(), key);
++    char *j = NULL;
++    uint32_t *spv = NULL;
+     size_t nspv = 0;
+-    uint32_t *spv = (uint32_t *)read_file(path, &nspv);
++    read_translation(key, &j, &spv, &nspv);
+     if (!j || !spv || nspv < 20 || (nspv & 3) || spv[0] != 0x07230203) { free(j); free(spv); return 0; }
+     s->stage = nvn_stage;
+     uint32_t base = nvn_stage == 1 ? VKB_STAGE_BINDINGS : 0;
+diff --git a/tools/pack_shaders.py b/tools/pack_shaders.py
+new file mode 100644
+index 0000000..8b136d5
+--- /dev/null
++++ b/tools/pack_shaders.py
+@@ -0,0 +1,62 @@
++"""Pack the translated shaders into one file: <dir>/shaders.pack, read by src/gfx/vkb_shader.c.
++
++usage: python tools/pack_shaders.py [<dir>]   (default data\\shaders\\ryujinx)
++
++The translation writes two files per shader, <key>.spv and <key>.res.json (~57,000 files for 1.4.3); the game reads
++the pack first and falls back to them. The loose files stay: the next translation run (--new-only) adds to them, and
++the pack is written again. Layout, little-endian: b'UTSHPK01', u32 count, u32 0, then count entries sorted by key
++{key[32] (the SHA-256), u64 offset, u32 SPIR-V bytes, u32 reflection bytes}, then the data (each SPIR-V followed by
++its reflection).
++"""
++import os
++import pathlib
++import re
++import struct
++import sys
++
++MAGIC = b'UTSHPK01'
++KEY = re.compile(r'[0-9a-f]{64}')
++
++
++def pack(folder, out=None):
++    folder = pathlib.Path(folder)
++    out = pathlib.Path(out) if out else folder / 'shaders.pack'
++    keys = sorted(p.stem for p in folder.glob('*.spv')
++                  if KEY.fullmatch(p.stem) and (folder / f'{p.stem}.res.json').is_file())
++    tmp = out.with_name(out.name + '.tmp')
++    offset = 16 + 48 * len(keys)
++    index = []
++    with open(tmp, 'wb') as f:
++        f.write(MAGIC + struct.pack('<II', len(keys), 0))
++        f.write(bytes(48 * len(keys)))   # the index, written once the offsets are known
++        for key in keys:
++            spv = (folder / f'{key}.spv').read_bytes()
++            refl = (folder / f'{key}.res.json').read_bytes()
++            f.write(spv)
++            f.write(refl)
++            index.append(bytes.fromhex(key) + struct.pack('<QII', offset, len(spv), len(refl)))
++            offset += len(spv) + len(refl)
++        f.seek(16)
++        f.write(b''.join(index))
++    os.replace(tmp, out)
++    return len(keys), offset
++
++
++def stale(folder, out=None):
++    """True if the pack is missing or older than a translated shader (the translation added or rewrote one)."""
++    folder = pathlib.Path(folder)
++    out = pathlib.Path(out) if out else folder / 'shaders.pack'
++    if not out.is_file():
++        return True
++    t = out.stat().st_mtime
++    return any(e.stat().st_mtime > t for e in os.scandir(folder) if e.name.endswith(('.spv', '.res.json')))
++
++
++def main():
++    folder = sys.argv[1] if len(sys.argv) > 1 else 'data/shaders/ryujinx'
++    n, size = pack(folder)
++    print(f'{n} shaders packed into {pathlib.Path(folder) / "shaders.pack"} ({size / 2**20:.0f} MiB)')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/setup.py b/tools/setup.py
+index 9abedb6..c764e56 100644
+--- a/tools/setup.py
++++ b/tools/setup.py
+@@ -360,6 +360,10 @@ def step_shaders(dump, state, cpus):
+     run([sys.executable, 'tools/run_ryujinx_xlate.py', out, '--workers', min(cpus, 32), '--quiet'] + new_only,
+         'translating the shaders')
+     state['shaders-xlate'] = xlate
++    from pack_shaders import pack, stale   # one file instead of two per shader (src/gfx/vkb_shader.c reads it first)
++    if stale(out / 'ryujinx'):
++        n, size = pack(out / 'ryujinx')
++        say(f'  {n} shaders packed into data\\shaders\\ryujinx\\shaders.pack ({size / 2**20:.0f} MiB)')
+     return 'done'
+ 
+ 

@@ -1,0 +1,40 @@
+#28 — Port the 60/120 FPS game patches so TOTK_UNCAPPED can be used
+Estado: OPEN   Autor: 454135431515   Criada: 2026-10-27T13:36:19Z   Atualizada: 2026-10-27T13:38:06Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/28
+
+=== Descrição ===
+Hi, and thanks for the port.
+
+Request: an unlocked frame rate with correct game speed, at least 60 FPS,
+ideally up to 120 FPS.
+
+What I found in the code (commit 1970c7a, src/gfx/nvn/hle_nvn.c):
+
+- TOTK_UNCAPPED, TOTK_FPS60 and TOTK_UNCAPPED_HZ already exist, with a
+  ceiling of UNCAPPED_HZ = 120.
+- The comment in present_cfg says uncapped mode is off because it needs
+  MacNativeGames' 60 FPS game patches and the real-time frame step
+  (game_patches_v143.c), which are not ported yet. Without them the engine
+  steps game time by the chosen present interval and the game runs fast.
+- game_patches_v143.c is not in the repository.
+
+So the missing piece seems to be porting those patches (time step tied to
+real frame time instead of the present interval) to the Windows build. Once
+that is in, TOTK_UNCAPPED=1 with TOTK_UNCAPPED_HZ=60 or 120 should give
+correct speed.
+
+For reference: on the Eden emulator (Linux, CachyOS) with a frame rate mod
+I get a stable 60 FPS everywhere, so the game logic can run at 60 on this
+kind of setup. Hardware: Intel Core i7-8700K, NVIDIA GeForce GTX 1080 Ti,
+32 GB RAM. Main display is 165 Hz, so a 120 FPS cap would be usable.
+
+Things that may need checking after the change:
+- UI logic that counts frames (you note SaveIndicatorPanel in the comments)
+- pre-rendered cutscenes, which are 30 FPS video
+- physics at 120 FPS, since the emulator mods are mostly tested up to 60
+
+If a PR would help more than an issue, I can test builds on my machine.
+
+=== Comentários ===
+(sem comentários)

@@ -1,0 +1,14 @@
+#4 — Crash
+Estado: OPEN   Autor: ardmeteor999   Criada: 2026-10-26T07:57:44Z   Atualizada: 2026-10-27T02:13:40Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/4
+
+=== Descrição ===
+Crash after attack the bat near ganon room and please add setting to set the screen resolution
+
+=== Comentários ===
+--- passballtotucker em 2026-10-26T19:44:29Z
+It crashes for me there as well.
+
+--- ScrubOasis em 2026-10-27T02:13:39Z
+Also crashing during the cutscene after the bats in the opening.

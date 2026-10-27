@@ -1,0 +1,18 @@
+#23 — Infinite black screen - AMD Card
+Estado: OPEN   Autor: querojogarbem   Criada: 2026-10-27T04:30:09Z   Atualizada: 2026-10-27T04:30:09Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/23
+
+=== Descrição ===
+I have an RX 6750 XT, and when I run UltraTears.exe, all I get is a black screen, though I can still hear the sound of footsteps in the game.
+
+Drive amd 26.10.1
+Card: RX 6750 XT 12GB
+CPU: Ryzen 5600
+Memory: 16GB RAM
+
+<img width="1920" height="1080" alt="Image" src="https://github.com/user-attachments/assets/16d73fbd-c32f-4c36-9f93-1b65414afafe" />
+<img width="1920" height="1080" alt="Image" src="https://github.com/user-attachments/assets/5c256999-8a16-491e-bfb2-11101a23a7dd" />
+
+=== Comentários ===
+(sem comentários)

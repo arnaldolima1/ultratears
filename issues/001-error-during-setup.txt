@@ -1,0 +1,98 @@
+#1 — Error during setup
+Estado: OPEN   Autor: virtualvxmp   Criada: 2026-10-25T21:18:49Z   Atualizada: 2026-10-27T02:08:06Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/1
+
+=== Descrição ===
+I'm not sure what I'm doing wrong here? The update is applied each time I do it unless I'm doing it wrong? <img width="3346" height="1056" alt="Image" src="https://github.com/user-attachments/assets/ff580e1b-4783-4a3c-8b08-b7faa0a495e9" />
+
+=== Comentários ===
+--- faeyzot em 2026-10-25T22:30:17Z
+same error
+
+--- ikeracevedo2002 em 2026-10-26T00:51:44Z
+I solved it using Ryubing to extract the files
+
+--- faeyzot em 2026-10-26T03:24:51Z
+I use ryubing too but still error
+
+Pada Sen, 26 Okt 2026, 08.52, Iker Acevedo ***@***.***>
+menulis:
+
+> *ikeracevedo2002* left a comment (kuraeow/ultratears#1)
+> <https://github.com/kuraeow/ultratears/issues/1#issuecomment-6405788993>
+>
+> I solved it using Ryubing to extract the files
+>
+> —
+> Reply to this email directly, view it on GitHub
+> <https://github.com/kuraeow/ultratears/issues/1?email_source=notifications&email_token=AI2OJFB6UU5IIW3FHRHIE235V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJLDGN5XXIZLSL5RWY2LDNM#issuecomment-6405788993>,
+> or unsubscribe
+> <https://github.com/notifications/unsubscribe-auth/AI2OJFEOMFNE3U7MH5GAKVT5V2N3LAVCNFSNUABGKJSXA33TNF2G64TZHMYTIMZSGY4TKMZVGI5US43TOVSTWNRQGI4TINBYGMYDDILWAI>
+> .
+> Triage notifications, keep track of coding agent tasks and review pull
+> requests on the go with GitHub Mobile for iOS
+> <https://github.com/notifications/mobile/ios/AI2OJFBZJV5QIH75PFNMIAD5V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJKTGN5XXIZLSL5UW64Y>
+> and Android
+> <https://github.com/notifications/mobile/android/AI2OJFES7W34CXDC4DGJQBL5V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJLTGN5XXIZLSL5QW4ZDSN5UWI>.
+> Download it today!
+> You are receiving this because you commented.Message ID:
+> ***@***.***>
+>
+
+--- faeyzot em 2026-10-26T06:43:41Z
+> 2\. I solved it using Ryubing to extract the files
+
+which version of ryubing
+
+--- devmachine1 em 2026-10-26T07:05:34Z
+You didnt merge update and base game probably.
+
+How I did it was first patching the base NSP with the update NSP and then using hactool/hactoolnet and AI for like commands which decompress the NSPs into NCAs, then decompress these NCAs again into exefs and romfs dumps and merging both the update and base dumps. Here are the hactool commands for decompressing the NSP into NCAs and then into exefs and romfs dumps and then merging them:
+
+```
+.\hactoolnet.exe -k prod.keys -t pfs0 --outdir nsp_out "<base+update>.nsp"
+
+.\hactoolnet.exe -k prod.keys --titlekeys title.keys -t nca "nsp_out\<update_file>.nca"
+.\hactoolnet.exe -k prod.keys --titlekeys title.keys -t nca "nsp_out\<base_game>.nca"
+
+.\hactoolnet.exe -k prod.keys --titlekeys title.keys -t nca --basenca "<base_game>.nca" --exefsdir exefs_out --romfsdir romfs_out "<update_file>.nca"
+```
+
+Honestly, you could also do this with your switch and NXDumptool. You forgot to merge update and base game.
+
+--- sharadindudas em 2026-10-26T15:05:26Z
+You can use citron to do this :)
+
+--- cewsbyte em 2026-10-27T02:06:16Z
+> I'm not sure what I'm doing wrong here? The update is applied each time I do it unless I'm doing it wrong? <img alt="Image" width="2000" height="631" src="https://private-user-images.githubusercontent.com/312244598/684243468-ff580e1b-4783-4a3c-8b08-b7faa0a495e9.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3OTMwNjY5OTgsIm5iZiI6MTc5MzA2NjY5OCwicGF0aCI6Ii8zMTIyNDQ1OTgvNjg0MjQzNDY4LWZmNTgwZTFiLTQ3ODMtNGEzYy04YjA4LWI3ZmFhMGE0OTVlOS5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYxMDI3JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MTAyN1QwMjA0NThaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT1hMzgxNTVkZjFmNjI0NWI3M2RmYmZmYTk1Njc1ZDgyMzBkZGYxNjYxYWI0OGJlYTUzNGEyZjQ4ZGJhY2RhNDRlJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.2GRC6XvalyWj5a_arjIxynSug6H0MmSofxU6JsYNC-I">
+
+Check your ROM, it's corrupted, get a new one.
+
+--- cewsbyte em 2026-10-27T02:08:06Z
+> 3\. I use ryubing too but still error
+>         
+>         Pada Sen, 26 Okt 2026, 08.52, Iker Acevedo ***@***.***>
+>         menulis:
+>         […](#)
+>          *ikeracevedo2002* left a comment ([kuraeow/ultratears#1](https://github.com/kuraeow/ultratears/issues/1))
+>          <[#1 (comment)](https://github.com/kuraeow/ultratears/issues/1#issuecomment-6405788993)>
+>         
+>          I solved it using Ryubing to extract the files
+>         
+>          —
+>          Reply to this email directly, view it on GitHub
+>          <[#1](https://github.com/kuraeow/ultratears/issues/1)?email_source=notifications&email_token=AI2OJFB6UU5IIW3FHRHIE235V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJLDGN5XXIZLSL5RWY2LDNM#issuecomment-6405788993>,
+>          or unsubscribe
+>          <https://github.com/notifications/unsubscribe-auth/AI2OJFEOMFNE3U7MH5GAKVT5V2N3LAVCNFSNUABGKJSXA33TNF2G64TZHMYTIMZSGY4TKMZVGI5US43TOVSTWNRQGI4TINBYGMYDDILWAI>
+>          .
+>          Triage notifications, keep track of coding agent tasks and review pull
+>          requests on the go with GitHub Mobile for iOS
+>          <https://github.com/notifications/mobile/ios/AI2OJFBZJV5QIH75PFNMIAD5V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJKTGN5XXIZLSL5UW64Y>
+>          and Android
+>          <https://github.com/notifications/mobile/android/AI2OJFES7W34CXDC4DGJQBL5V2N3LA5CNFSNUABFM5UWIORPF5TWS5BNNB2WEL2JONZXKZKDN5WW2ZLOOQXTMNBQGU3TQOBZHEZ2M4TFMFZW63VHMNXW23LFNZ2KKZLWMVXHJLTGN5XXIZLSL5QW4ZDSN5UWI>.
+>          Download it today!
+>          You are receiving this because you commented.Message ID:
+>          ***@***.***>
+
+It's your ROM bruh, get a new redump.

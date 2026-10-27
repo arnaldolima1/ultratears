@@ -1,0 +1,54 @@
+#16 — **Title: UltraTears fails to run on AMD RX 9070 XT – Vulkan issue persists after driver reinstall**
+Estado: OPEN   Autor: rlftjdchs   Criada: 2026-10-26T14:29:43Z   Atualizada: 2026-10-26T15:06:49Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/16
+
+=== Descrição ===
+<!-- Failed to upload "runlog.txt" -->
+
+<!-- Failed to upload "runlog.txt" -->
+
+Hello,
+
+I'm experiencing an issue with UltraTears on my PC and haven't been able to resolve it.
+
+**My system specifications:**
+- CPU: AMD Ryzen 7 7800X3D
+- GPU: AMD Radeon RX 9070 XT
+- RAM: 32 GB
+- OS: Windows 10 Pro
+- Graphics API: Vulkan
+
+**Problem:**
+
+[runlog.txt](https://github.com/user-attachments/files/33970444/runlog.txt)
+
+UltraTears fails to run properly. The issue persists even after updating/reinstalling my AMD graphics drivers and restarting my PC.
+
+**Troubleshooting steps I've already tried:**
+
+1. Reinstalled the AMD graphics drivers.
+2. Restarted Windows after the driver installation.
+3. Set `TOTK_ASYNC_REPLAY=0` to disable asynchronous replay.
+4. Tried a workaround related to font handling.
+5. Repeated the test, but the same issue still occurs.
+
+None of these steps resolved the problem.
+
+**Questions:**
+
+1. Is the AMD Radeon RX 9070 XT currently supported?
+2. Are there any known Vulkan compatibility issues with AMD RDNA 4 GPUs?
+3. Does UltraTears require a specific AMD driver version or firmware version?
+4. Are there any additional settings or workarounds I should try?
+
+I can provide my `runlog.txt` and screenshots of the error if needed.
+
+Thank you for your work on this project. I would really appreciate any help or suggestions!
+
+=== Comentários ===
+--- triadwoozie em 2026-10-26T14:37:22Z
+AMD GPUs seem to have a problem for now afaik
+
+--- aiinnovationguru-png em 2026-10-26T15:06:49Z
+Hi, post your log please

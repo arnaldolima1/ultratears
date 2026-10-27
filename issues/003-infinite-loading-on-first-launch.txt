@@ -1,0 +1,23 @@
+#3 — Infinite Loading on first launch?
+Estado: OPEN   Autor: ScrubOasis   Criada: 2026-10-26T03:41:29Z   Atualizada: 2026-10-27T02:10:15Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/3
+
+=== Descrição ===
+Saw the Nint**** logo then it went to the load screen and the little icon is still moving, but it's been going for about 15 minutes now and doesn't seem to be making actual progress. The cmd window is still doing stuff like the game is trying to do something though.
+
+<img width="1140" height="612" alt="Image" src="https://github.com/user-attachments/assets/5c413ad1-f8e9-48be-9f0a-248169380401" />
+
+=== Comentários ===
+--- devmachine1 em 2026-10-26T07:07:59Z
+close and restart the game and it worked for me encountered the same issue
+
+--- Speedforce1230 em 2026-10-26T12:57:37Z
+Similar issue for me though I don't even get the little loading icon, just a pure black screen, the terminal looks similar too with things happening, RTX 3060 on Driver version 621.01, definitely needs a fix.
+
+EDIT: The game is actually "running", I can press buttons and I think I even skipped a cutscene and can use the joystick to move around, I just can't see anything beyond the black screen but I can hear everything.
+
+EDIT 2: Looks like the latest Nvidia drivers are an issue, I rolled back to 617.42 and made sure to delete both the textures and shaders from the data folder before running setup.bat again so it would recompile everything and now I can see the game is displaying the content correctly.
+
+--- ScrubOasis em 2026-10-27T02:10:15Z
+Can confirm that nvidia driver 617.42 did work for me. Game runs pretty poorly which is weird because I should way be able to handle it.

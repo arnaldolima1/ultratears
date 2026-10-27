@@ -1,0 +1,60 @@
+#18 — Loading a save crashes: "no function at 8006eb850" (jump table at main 0x8006eb84c lifted with only 1 of 7 targets)
+Estado: OPEN   Autor: PashaKagan   Criada: 2026-10-26T19:33:26Z   Atualizada: 2026-10-26T19:33:26Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/18
+
+=== Descrição ===
+**Version:** UltraTears 0.1.0 (commit 3654e1c), builder package, Windows, RTX 4090 Laptop GPU
+**Game:** TotK 1.4.3 (exefs/romfs check passed)
+
+### What happens
+Loading any save (tested with an old Switch save and a fresh save made in an emulator on 1.4.3) crashes about 40 s in, while the save loads:
+
+```
+FATAL: no function at 8006eb850 (lr=8006e958c _ZdaPv+3a694c)
+  #3  f_8006e9340+703
+  #4  f_8006e91d0+338
+  #5  f_8029a2910+4121
+  #6  f_800acf89c+15b
+  #7  f_800acf828+111
+  #8  f_8027d2a74+23c
+  #9  f_805141cd0+217
+  #10 f_805148470+128
+Exit code: -1073740791
+```
+
+### Cause
+`br x12` at **main 0x8006eb84c**, inside f_8006eaa28, is a byte jump table:
+
+```
+8006eaeb0  adrp x28, 0x802d06000
+8006eaeb4  add  x28, x28, #0xa2        ; table 0x802d060a2, set once near the top
+...                                     ; x28 reused for other values on other paths
+8006eb838  cmp  w24, #7
+8006eb83c  b.hi 0x8006eb7b4
+8006eb840  adr  x12, 0x8006eb7b0
+8006eb844  ldrb w13, [x28, x22]
+8006eb848  add  x12, x12, x13, lsl #2
+8006eb84c  br   x12
+```
+
+The table bytes are `28 28 39 00 3f 86 7f 7c`, so the targets are 0x8006eb850, 0x8006eb894, 0x8006eb7b0, 0x8006eb8ac, 0x8006eb9c8, 0x8006eb9ac and 0x8006eb9a0.
+
+`jump_table()` in tools/lifter/gen.py returns only `[0x8006eb7b0]`. The emulation reads the table at the scratch address. Then `_jump_table_scan` gives up: the closest earlier write of x28 before the br is not the `adrp`/`add` pair, because x28 is reused in between. So `jump_table` returns that single unconfirmed target, the other 6 targets are never labels, and the br falls through to dispatch.
+
+### Fix that works here
+In `jump_table()`, when the scan cannot confirm the table and the emulation found at most one target, return `None`. The br then gets the existing `computed_target` → `'all'` fallback instead of trusting one guess:
+
+```python
+        if s is None and r is not None and len(set(r)) <= 1:
+            self.stats['jumptables_single_unconfirmed'] += 1
+            return None
+        return r if r is not None else s
+```
+
+On main (1.4.3) this changes only 3 brs (`jumptables_single_unconfirmed: 3`). With it, saves load and the game runs (tested in-game).
+
+**Something I tried that made it worse:** teaching `_jump_table_scan` to accept any single adrp+add of the table register in the function. That resolved 0x8006eb84c correctly. But it turned main 0x801553050, which had the safe `'all'` fallback, into a 43-target table that misses 0x8015485b0, and the game crashed later with `FATAL: no function at 8015485b0`. So a wider scan needs care. The single-target fallback above is the conservative version.
+
+=== Comentários ===
+(sem comentários)

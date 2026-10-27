@@ -1,0 +1,42 @@
+#26 — # [Bug Report] Instant Crash on Boot: Exception c0000005 in lasrecomp (Intel Iris Xe
+Estado: OPEN   Autor: mazenxp   Criada: 2026-10-27T09:38:43Z   Atualizada: 2026-10-27T09:38:43Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/26
+
+=== Descrição ===
+### Environment Details
+- **OS:** Windows 11 Home 64-bit
+- **CPU:** 12th Gen Intel Core i5
+- **GPU:** Intel Iris Xe Graphics (Integrated)
+- **RAM:** 16 GB
+- **Build Version:** UltraTears-builder-0.1.0-windows-x86_64
+
+### Issue Summary
+`UltraTears.exe` crashes immediately during initialization right after `totk-gfx` surface setup and dynamic resolution initialization[cite: 2].
+
+### Error Output / Stack Trace
+```text
+[totk-gfx] [vk] uniform contents as of the submit call: on
+[hid] the game initialized its vibration devices (handle 0x3)
+[totk-gfx] [vk] descriptors: descriptor sets
+[totk-gfx] [nvn] dynamic resolution off: fixed scene size (TOTK_DRS)
+[totk-gfx] [vk] recording threads: 4
+[totk-gfx] [vk] copies of game memory in device memory: off (memory shared with the GPU)
+[totk-gfx] [vk] submission 1: commands so far draw 0, indexed 0, dispatch 0, clear 0, set targets 0, render enable 0, conditional render 0 (draws and clears skipped 0, conditionals unknown 0)
+[hid] first vibration value from the game: left 0.00@160 Hz 0.00@320 Hz
+[totk-gfx] [nvn] WindowCrop 0,0 1920x1080
+[plat] fault execute 0: region 0000000000000000+0x730000 state 0x10000 protect 0x1 (allocation 0000000000000000)
+
+*** exception c0000005 accessing 0
+    host pc 0 (?+0)
+    host lr 7ff74b429ba9 (?)
+    (no guest thread)
+#0  00007ff74b3c4428 lasrecomp+4428
+#1  00007ff74b3c1679 lasrecomp+1679
+#2  00007ff74b3c244d lasrecomp+244d
+#3  00007ff74b3c466c lasrecomp+466c
+#4  00007fff9a95f4e3 KERNELBASE.dll+10f4e3
+#5  00007fff9d38a030 ntdll.dll+16a030
+
+=== Comentários ===
+(sem comentários)

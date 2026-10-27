@@ -1,0 +1,71 @@
+PR #6 — fix(memory): map zeroed underflow guard page before guest base
+Estado: OPEN   Autor: triadwoozie   Criado: 2026-10-26T08:28:32Z   Atualizado: 2026-10-26T08:28:32Z
+Branch: fix/linux-memory-underflow-pr -> dev   +4 -0 em 1 arquivos
+URL: https://github.com/kuraeow/ultratears/pull/6
+
+=== Descrição ===
+## Map zeroed 64 KiB underflow guard page before guest memory base
+
+### Problem
+
+During early boot, `sead::ResourceMgr`'s container traversal walks backward through its internal linked list. On this particular 1.4.3 code path the traversal reads at offset `0x6fffffffe0` — **64 bytes below the guest memory base** at `0x7000000000` (i.e. `GUEST_LO`).
+
+On macOS/Windows the virtual address space below `GUEST_LO` happens to be readable (the host's own address space is mapped there). On Linux, `plat_reserve_guest()` reserves exactly `[GUEST_LO, GUEST_HI)` — nothing else. The read at `0x6fffffffe0` therefore hits an unmapped page and raises **SIGSEGV**, aborting the game before `nn::init::Start` can return.
+
+### Fix
+
+In `plat_reserve_guest()` (`src/runtime/platform/linux.c`), before reserving the main guest window, map a **64 KiB (`0x10000`) anonymous, zero-filled, non-reserved page** at `GUEST_LO - 0x10000` using `MAP_FIXED_NOREPLACE`:
+
+```c
+if (lo >= 0x10000) {
+    mmap((void *)(uintptr_t)(lo - 0x10000), 0x10000, PROT_READ | PROT_WRITE,
+         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+}
+```
+
+This extends the readable region to `[GUEST_LO - 0x10000, GUEST_HI)`. The guard mapping:
+- Is **zero-filled** — backward traversal sees NULL pointers and terminates cleanly.
+- Uses `MAP_NORESERVE` — does not count against overcommit or swap.
+- Uses `MAP_FIXED_NOREPLACE` — silently skips if the host already occupies that range (safe on systems where the kernel places its own mappings there).
+
+### Verification
+
+With this fix applied, `plat_reserve_guest()` succeeds and the game progresses past `sead::ResourceMgr` initialization into NVN/Vulkan device setup. Without it, every run terminates with:
+
+```
+*** signal 11 accessing 0x6fffffffe0
+    guest call chain:
+    #0  0x800cb5e30 nninitStartup+0x10440
+    #1  0x800cb4bbc nninitStartup+0xf1cc
+    ...
+```
+
+### Scope
+
+Only `src/runtime/platform/linux.c` is modified. The macOS and Windows platform files are unchanged.
+
+=== Arquivos ===
+  src/runtime/platform/linux.c (+4 -0)
+
+=== Comentários ===
+(sem comentários)
+
+=== Revisões ===
+(sem revisões)
+
+=== Diff ===
+diff --git a/src/runtime/platform/linux.c b/src/runtime/platform/linux.c
+index d263687..f9bcedd 100644
+--- a/src/runtime/platform/linux.c
++++ b/src/runtime/platform/linux.c
+@@ -28,6 +28,10 @@
+ // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
+ // cost nothing (MAP_NORESERVE: the 12 GB window doesn't count against overcommit).
+ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
++    if (lo >= 0x10000) {
++        mmap((void *)(uintptr_t)(lo - 0x10000), 0x10000, PROT_READ | PROT_WRITE,
++             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
++    }
+     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+     if (p == MAP_FAILED) return false;

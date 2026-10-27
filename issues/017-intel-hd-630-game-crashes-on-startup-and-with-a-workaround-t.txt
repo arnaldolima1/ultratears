@@ -1,0 +1,52 @@
+#17 — Intel HD 630: game crashes on startup, and with a workaround the graphics show big white/black blocks
+Estado: OPEN   Autor: sharadindudas   Criada: 2026-10-26T19:03:43Z   Atualizada: 2026-10-26T19:03:43Z
+Rótulos: -
+URL: https://github.com/kuraeow/ultratears/issues/17
+
+=== Descrição ===
+**My PC**
+- Intel Core i3-7100T
+- Intel HD Graphics 630 (driver 31.0.101.2141)
+- 16 GB RAM, Windows 10
+- UltraTears 0.1.0-beta, TOTK 1.4.3 (setup finished fine)
+
+**Problem 1: the game closes right after starting**
+
+The game closes with no error message a few seconds after launch. The log shows my GPU doesn't have `VK_EXT_shader_object`. The game says it's "not available" and keeps going, but then still tries to use it to load shaders and crashes:
+
+```
+[totk-vk] extension VK_EXT_shader_object not available
+[totk-gfx] [vk] shader list: 429 shaders to make ahead
+*** exception c0000005 accessing 0
+```
+
+It crashes in `src/gfx/vkb_shader.c` line 174 (`vkCreateShadersEXT`). Older Intel graphics (HD 520/530/620/630, UHD 620/630) don't have this feature, so I think they will all crash the same way. An error message saying "your GPU is not supported" would help people understand what's wrong.
+
+**Problem 2: with a workaround it runs, but most of the screen is white/black blocks**
+
+I got past the crash with the shader object layer from the Vulkan SDK:
+```
+set VK_ADD_LAYER_PATH=C:\VulkanSDK\1.4.363.0\Bin
+set VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_shader_object
+```
+Now the game runs. I can play the opening and talk to Zelda at about 20 FPS (it drops to 1 FPS at times). But the ground, walls and characters are covered in big white and black blocks. Fire, subtitles, hearts and button prompts look normal. Screenshots attached.
+
+The log has these lines, which may explain it:
+```
+[totk-vk] no attachment feedback loops: textures that are attachments of their pass read empty
+[totk-gfx] [vk] [temporary] storage buffer ... not in an imported pool (or misaligned): an empty one is bound
+```
+
+Logs attached:
+- `log-1-crash-without-workaround.log`: Problem 1
+- `log-2-white-blocks-with-workaround.log`: Problem 2
+
+<img width="1280" height="720" alt="Image" src="https://github.com/user-attachments/assets/684ec707-bcdc-4522-b7c1-03122b8b187b" />
+
+<img width="1280" height="720" alt="Image" src="https://github.com/user-attachments/assets/b299d139-5c3d-4bfa-bcc3-7fdf6c6b20eb" />
+
+[log-2-white-blocks-with-workaround.log](https://github.com/user-attachments/files/33980956/log-2-white-blocks-with-workaround.log)
+[log-1-crash-without-workaround.log](https://github.com/user-attachments/files/33980957/log-1-crash-without-workaround.log)
+
+=== Comentários ===
+(sem comentários)

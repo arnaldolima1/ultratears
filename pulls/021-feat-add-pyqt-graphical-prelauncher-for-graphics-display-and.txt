@@ -1,0 +1,3282 @@
+PR #21 — feat: add PyQt graphical prelauncher for graphics, display, and controls
+Estado: OPEN   Autor: RxEmam   Criado: 2026-10-27T03:03:02Z   Atualizado: 2026-10-27T03:03:02Z
+Branch: feature/prelauncher -> main   +3213 -0 em 7 arquivos
+URL: https://github.com/kuraeow/ultratears/pull/21
+
+=== Descrição ===
+- Add PrelauncherWindow GUI (prelauncher.py) with modern tabbed layout for system checks, display configuration, graphics presets, controls remapping, and game launch
+- Add display and graphics configuration module (display_config.py) supporting resolution scaling, DRS, XeSS SR/FG toggles, shadow resolution, and frame rate caps
+- Add keyboard and controller configuration management (input_config.py, controls_widgets.py, src/host/keyboard_bindings.def) with visual key binding table, conflict resolution, and sensitivity controls
+- Add comprehensive test suites (tools/test_prelauncher.py, tools/test_controls.py) verifying config persistence, UI round-trips, and launch environments
+
+=== Arquivos ===
+  controls_widgets.py (+507 -0)
+  display_config.py (+181 -0)
+  input_config.py (+148 -0)
+  prelauncher.py (+1866 -0)
+  src/host/keyboard_bindings.def (+29 -0)
+  tools/test_controls.py (+222 -0)
+  tools/test_prelauncher.py (+260 -0)
+
+=== Comentários ===
+(sem comentários)
+
+=== Revisões ===
+(sem revisões)
+
+=== Diff ===
+diff --git a/controls_widgets.py b/controls_widgets.py
+new file mode 100644
+index 0000000..cf9e5a5
+--- /dev/null
++++ b/controls_widgets.py
+@@ -0,0 +1,507 @@
++"""Native Qt editing of the keyboard and direct mouse camera profile consumed by the SDL host."""
++import sys
++from PyQt6.QtCore import Qt, QEvent, pyqtSignal
++from PyQt6.QtWidgets import (QWidget, QPushButton, QLabel, QFrame, QVBoxLayout,
++                             QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView,
++                             QAbstractItemView, QComboBox, QDoubleSpinBox, QCheckBox, QMessageBox)
++from input_config import ACTIONS, InputSettings, RESERVED_KEYS, key_name
++
++
++def event_scancode(event):
++    """Store physical SDL scancodes, including when Windows is using Arabic input."""
++    key, native, scan = event.key(), event.nativeVirtualKey(), event.nativeScanCode()
++    if sys.platform == 'win32' and native:
++        if native == 0x13: return 72  # Pause has an E1 sequence, unlike Num Lock.
++        if scan & 0xff00 == 0xe000: scan = (scan & 0xff) | 0x100
++        physical = {
++            0x1e: 4, 0x30: 5, 0x2e: 6, 0x20: 7, 0x12: 8, 0x21: 9, 0x22: 10,
++            0x23: 11, 0x17: 12, 0x24: 13, 0x25: 14, 0x26: 15, 0x32: 16,
++            0x31: 17, 0x18: 18, 0x19: 19, 0x10: 20, 0x13: 21, 0x1f: 22,
++            0x14: 23, 0x16: 24, 0x2f: 25, 0x11: 26, 0x2d: 27, 0x15: 28, 0x2c: 29,
++            **{2 + n: 30 + n for n in range(9)}, 0x0b: 39,
++            0x1c: 40, 1: 41, 0x0e: 42, 0x0f: 43, 0x39: 44,
++            0x0c: 45, 0x0d: 46, 0x1a: 47, 0x1b: 48, 0x2b: 49,
++            0x27: 51, 0x28: 52, 0x29: 53, 0x33: 54, 0x34: 55, 0x35: 56, 0x3a: 57,
++            **{0x3b + n: 58 + n for n in range(10)}, 0x57: 68, 0x58: 69,
++            0x137: 70, 0x46: 71, 0x152: 73, 0x147: 74, 0x149: 75, 0x153: 76,
++            0x14f: 77, 0x151: 78, 0x14d: 79, 0x14b: 80, 0x150: 81, 0x148: 82,
++            0x45: 83, 0x135: 84, 0x37: 85, 0x4a: 86, 0x4e: 87, 0x11c: 88,
++            0x4f: 90 - 1, 0x50: 90, 0x51: 91, 0x4b: 92, 0x4c: 93, 0x4d: 94,
++            0x47: 95, 0x48: 96, 0x49: 97, 0x52: 98, 0x53: 99,
++            0x1d: 224, 0x2a: 225, 0x38: 226, 0x11d: 228, 0x36: 229, 0x138: 230,
++        }
++        if scan in physical: return physical[scan]
++        if 0x41 <= native <= 0x5a: return native - 0x41 + 4
++        if 0x31 <= native <= 0x39: return native - 0x31 + 30
++        if 0x70 <= native <= 0x7b: return native - 0x70 + 58
++        if 0x61 <= native <= 0x69: return native - 0x61 + 89
++        if native == 0x10: return 229 if scan == 0x36 else 225
++        if native == 0x11: return 228 if scan & 0x100 else 224
++        if native == 0x12: return 230 if scan & 0x100 else 226
++        if native == 0x0d: return 88 if scan & 0x100 else 40
++        virtual = {0x30: 39, 0x08: 42, 0x09: 43, 0x1b: 41, 0x20: 44,
++                   0x14: 57, 0x2c: 70, 0x91: 71, 0x13: 72, 0x2d: 73,
++                   0x24: 74, 0x21: 75, 0x2e: 76, 0x23: 77, 0x22: 78,
++                   0x27: 79, 0x25: 80, 0x28: 81, 0x26: 82, 0x90: 83,
++                   0x6f: 84, 0x6a: 85, 0x6d: 86, 0x6b: 87, 0x60: 98, 0x6e: 99,
++                   0xa0: 225, 0xa1: 229, 0xa2: 224, 0xa3: 228, 0xa4: 226, 0xa5: 230,
++                   0xbd: 45, 0xbb: 46, 0xdb: 47, 0xdd: 48, 0xdc: 49,
++                   0xba: 51, 0xde: 52, 0xc0: 53, 0xbc: 54, 0xbe: 55, 0xbf: 56}
++        if native in virtual: return virtual[native]
++    if Qt.Key.Key_A <= key <= Qt.Key.Key_Z: return key - Qt.Key.Key_A + 4
++    if Qt.Key.Key_1 <= key <= Qt.Key.Key_9: return key - Qt.Key.Key_1 + 30
++    if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12: return key - Qt.Key.Key_F1 + 58
++    special = {Qt.Key.Key_0: 39, Qt.Key.Key_Return: 40, Qt.Key.Key_Enter: 88,
++               Qt.Key.Key_Escape: 41, Qt.Key.Key_Backspace: 42, Qt.Key.Key_Tab: 43,
++               Qt.Key.Key_Backtab: 43, Qt.Key.Key_Space: 44, Qt.Key.Key_Minus: 45,
++               Qt.Key.Key_Equal: 46, Qt.Key.Key_BracketLeft: 47, Qt.Key.Key_BracketRight: 48,
++               Qt.Key.Key_Backslash: 49, Qt.Key.Key_Semicolon: 51, Qt.Key.Key_Apostrophe: 52,
++               Qt.Key.Key_QuoteLeft: 53, Qt.Key.Key_Comma: 54, Qt.Key.Key_Period: 55,
++               Qt.Key.Key_Slash: 56, Qt.Key.Key_CapsLock: 57, Qt.Key.Key_Insert: 73,
++               Qt.Key.Key_Home: 74, Qt.Key.Key_PageUp: 75, Qt.Key.Key_Delete: 76,
++               Qt.Key.Key_End: 77, Qt.Key.Key_PageDown: 78, Qt.Key.Key_Right: 79,
++               Qt.Key.Key_Left: 80, Qt.Key.Key_Down: 81, Qt.Key.Key_Up: 82,
++               Qt.Key.Key_Control: 224, Qt.Key.Key_Shift: 225, Qt.Key.Key_Alt: 226,
++               Qt.Key.Key_AltGr: 230}
++    return special.get(key, 0)
++
++
++class KeyBindingButton(QPushButton):
++    chosen = pyqtSignal(int)
++    cleared = pyqtSignal()
++    rejected = pyqtSignal(str)
++
++    def __init__(self, code, label, parent=None):
++        super().__init__(parent)
++        self.code = code
++        self.waiting = False
++        self.setAccessibleName(label)
++        self.setToolTip('Click, then press a key or mouse button. Right-click when not capturing to clear. Click elsewhere to cancel.')
++        self.clicked.connect(self.begin_capture)
++        self.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.setMinimumHeight(30)
++        self.set_code(code)
++
++    def _update_visual_style(self):
++        if self.waiting:
++            self.setStyleSheet("""
++                QPushButton {
++                    background: #fffbeb;
++                    color: #b45309;
++                    border: 2px solid #d97706;
++                    border-radius: 6px;
++                    font-weight: 700;
++                    font-size: 12px;
++                    padding: 4px 8px;
++                }
++            """)
++        elif self.code == 0:
++            self.setStyleSheet("""
++                QPushButton {
++                    background: #f8fafc;
++                    color: #64748b;
++                    border: 1px dashed #cbd5e1;
++                    border-radius: 6px;
++                    font-weight: 600;
++                    font-size: 12px;
++                    padding: 4px 8px;
++                }
++                QPushButton:hover {
++                    background: #f1f5f9;
++                    border: 1px solid #0f766e;
++                    color: #0f766e;
++                }
++            """)
++        else:
++            self.setStyleSheet("""
++                QPushButton {
++                    background: #ffffff;
++                    color: #0f172a;
++                    border: 1px solid #cbd5e1;
++                    border-radius: 6px;
++                    font-weight: 700;
++                    font-size: 12px;
++                    padding: 4px 8px;
++                }
++                QPushButton:hover {
++                    background: #f0fdfa;
++                    border: 1px solid #0f766e;
++                    color: #0f766e;
++                }
++                QPushButton:disabled {
++                    background: #f1f5f9;
++                    color: #94a3b8;
++                    border: 1px solid #e2e8f0;
++                }
++            """)
++
++    def set_code(self, code):
++        self.code = code
++        self.waiting = False
++        self.setText(key_name(code))
++        self._update_visual_style()
++
++    def begin_capture(self):
++        self.waiting = True
++        self.setText('Key / mouse...')
++        self._update_visual_style()
++        self.setFocus()
++
++    def event(self, event):
++        # Intercept Tab before Qt turns it into focus navigation.
++        if self.waiting and event.type() == QEvent.Type.KeyPress:
++            if not event.isAutoRepeat():
++                code = event_scancode(event)
++                self.set_code(self.code)
++                if code in RESERVED_KEYS:
++                    self.rejected.emit('F8 is reserved for mouse capture; F11 is reserved for fullscreen.')
++                elif not code:
++                    self.rejected.emit('Choose a supported key or mouse button.')
++                else:
++                    self.chosen.emit(code)
++            return True
++        return super().event(event)
++
++    def focusOutEvent(self, event):
++        self.set_code(self.code)
++        super().focusOutEvent(event)
++
++    def mousePressEvent(self, event):
++        if self.waiting:
++            code = {Qt.MouseButton.LeftButton: 512, Qt.MouseButton.RightButton: 513,
++                    Qt.MouseButton.MiddleButton: 514}.get(event.button())
++            self.set_code(self.code)
++            if code: self.chosen.emit(code)
++            else: self.rejected.emit('Use the left, right or middle mouse button.')
++            event.accept()
++        elif event.button() == Qt.MouseButton.RightButton:
++            self.cleared.emit()
++            event.accept()
++        else:
++            super().mousePressEvent(event)
++
++
++class ControlsPage(QWidget):
++    def __init__(self, settings, save, gamepad_connected=False):
++        super().__init__()
++        self.settings, self.save = settings, save
++        layout = QVBoxLayout(self)
++        layout.setContentsMargins(28, 22, 28, 22)
++        layout.setSpacing(12)
++        title = QLabel('Controls & Input Configuration')
++        title.setStyleSheet('font-size: 20px; font-weight: 800; color: #0f172a;')
++        layout.addWidget(title)
++        note = QLabel('Click a binding, then press a key or mouse button. Right-click an idle binding to clear. '
++                      'Descriptions use the default in-game layout; button swaps and context still apply.')
++        note.setWordWrap(True)
++        note.setStyleSheet('color: #334155; font-size: 12px; font-weight: 500;')
++        layout.addWidget(note)
++
++        camera = QFrame()
++        camera.setObjectName('CardFrame')
++        camera_layout = QVBoxLayout(camera)
++        camera_layout.setContentsMargins(16, 14, 16, 14)
++        camera_layout.setSpacing(10)
++
++        row = QHBoxLayout()
++        row.setSpacing(10)
++        lbl_cam = QLabel('Camera control')
++        lbl_cam.setStyleSheet('color: #0f172a; font-weight: 700; font-size: 12px;')
++        row.addWidget(lbl_cam)
++        self.camera_mode = QComboBox()
++        self.camera_mode.addItem('Keyboard directions', 'keys')
++        self.camera_mode.addItem('Mouse movement (PC Direct)', 'mouse')
++        self.camera_mode.setAccessibleName('Camera control mode')
++        row.addWidget(self.camera_mode, 1)
++
++        lbl_path = QLabel('Mouse path')
++        lbl_path.setStyleSheet('color: #0f172a; font-weight: 700; font-size: 12px;')
++        row.addWidget(lbl_path)
++        self.mouse_backend = QComboBox()
++        self.mouse_backend.addItem('Native direct camera', 'native')
++        self.mouse_backend.addItem('Compatibility stick emulation', 'legacy_stick')
++        self.mouse_backend.setAccessibleName('Mouse camera backend')
++        row.addWidget(self.mouse_backend, 1)
++
++        lbl_prompts = QLabel('Button Prompts')
++        lbl_prompts.setStyleSheet('color: #0f172a; font-weight: 700; font-size: 12px;')
++        row.addWidget(lbl_prompts)
++        self.prompt_mode = QComboBox()
++        self.prompt_mode.addItem('Auto (Switch on Input)', 'auto')
++        self.prompt_mode.addItem('Keyboard & Mouse Only', 'kb_mouse')
++        self.prompt_mode.addItem('Switch Controller Only', 'controller')
++        self.prompt_mode.setAccessibleName('Button prompts display mode')
++        row.addWidget(self.prompt_mode, 1)
++        camera_layout.addLayout(row)
++
++        self.mouse_options = QWidget()
++        mouse_vbox = QVBoxLayout(self.mouse_options)
++        mouse_vbox.setContentsMargins(0, 0, 0, 0)
++        mouse_vbox.setSpacing(8)
++
++        row_direct = QHBoxLayout()
++        row_direct.setContentsMargins(0, 0, 0, 0)
++        row_direct.setSpacing(10)
++        lbl_look = QLabel('Look deg/count')
++        lbl_look.setStyleSheet('color: #1e293b; font-weight: 600; font-size: 12px;')
++        row_direct.addWidget(lbl_look)
++        self.look_deg_per_count = QDoubleSpinBox()
++        self.look_deg_per_count.setRange(0.001, 1.0)
++        self.look_deg_per_count.setDecimals(4)
++        self.look_deg_per_count.setSingleStep(0.005)
++        self.look_deg_per_count.setAccessibleName('Mouse look degrees per count')
++        row_direct.addWidget(self.look_deg_per_count)
++
++        lbl_aim = QLabel('Aim mult')
++        lbl_aim.setStyleSheet('color: #1e293b; font-weight: 600; font-size: 12px;')
++        row_direct.addWidget(lbl_aim)
++        self.aim_multiplier = QDoubleSpinBox()
++        self.aim_multiplier.setRange(0.1, 2.0)
++        self.aim_multiplier.setDecimals(2)
++        self.aim_multiplier.setSingleStep(0.05)
++        self.aim_multiplier.setAccessibleName('Bow and throw aim multiplier')
++        row_direct.addWidget(self.aim_multiplier)
++
++        lbl_scope = QLabel('Scope/Zoom mult')
++        lbl_scope.setStyleSheet('color: #1e293b; font-weight: 600; font-size: 12px;')
++        row_direct.addWidget(lbl_scope)
++        self.scope_multiplier = QDoubleSpinBox()
++        self.scope_multiplier.setRange(0.1, 2.0)
++        self.scope_multiplier.setDecimals(2)
++        self.scope_multiplier.setSingleStep(0.05)
++        self.scope_multiplier.setAccessibleName('Scope and zoom multiplier')
++        row_direct.addWidget(self.scope_multiplier)
++
++        lbl_smooth = QLabel('Smoothing')
++        lbl_smooth.setStyleSheet('color: #1e293b; font-weight: 600; font-size: 12px;')
++        row_direct.addWidget(lbl_smooth)
++        self.smooth_ms = QComboBox()
++        self.smooth_ms.addItem('0 ms (Raw)', 0)
++        self.smooth_ms.addItem('5 ms', 5)
++        self.smooth_ms.addItem('10 ms', 10)
++        self.smooth_ms.setAccessibleName('Mouse smoothing milliseconds')
++        row_direct.addWidget(self.smooth_ms)
++        row_direct.addStretch()
++        mouse_vbox.addLayout(row_direct)
++
++        row_compat = QHBoxLayout()
++        row_compat.setContentsMargins(0, 0, 0, 0)
++        row_compat.setSpacing(10)
++        self.invert_y = QCheckBox('Invert mouse Y')
++        self.invert_y.setStyleSheet('color: #0f172a; font-weight: 600; font-size: 12px;')
++        row_compat.addWidget(self.invert_y)
++        row_compat.addSpacing(12)
++        self.compat_sens_label = QLabel('Wheel / compat stick speed')
++        self.compat_sens_label.setStyleSheet('color: #1e293b; font-weight: 600; font-size: 12px;')
++        row_compat.addWidget(self.compat_sens_label)
++        self.sensitivity = QDoubleSpinBox()
++        self.sensitivity.setRange(0.1, 5.0)
++        self.sensitivity.setSingleStep(0.1)
++        self.sensitivity.setDecimals(2)
++        self.sensitivity.setAccessibleName('Mouse camera sensitivity')
++        row_compat.addWidget(self.sensitivity)
++        row_compat.addStretch()
++        mouse_vbox.addLayout(row_compat)
++
++        camera_layout.addWidget(self.mouse_options)
++        self.camera_hint = QLabel()
++        self.camera_hint.setWordWrap(True)
++        self.camera_hint.setStyleSheet('color: #475569; font-size: 11px; font-weight: 500;')
++        camera_layout.addWidget(self.camera_hint)
++        layout.addWidget(camera)
++
++        self.table = QTableWidget(len(ACTIONS), 4)
++        self.table.setHorizontalHeaderLabels(['Switch input', 'In-game action', 'Primary', 'Alternative'])
++        self.table.verticalHeader().hide()
++        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
++        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
++        self.table.setWordWrap(True)
++        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
++        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
++        for column in (2, 3):
++            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
++            self.table.setColumnWidth(column, 124)
++        self.buttons = {}
++        for index, action in enumerate(ACTIONS):
++            self.table.setRowHeight(index, 42)
++            for col, value in enumerate((action['switch'], action['description'])):
++                item = QTableWidgetItem(value)
++                item.setToolTip(action['group'] + ': ' + action['description'])
++                self.table.setItem(index, col, item)
++            pair = []
++            for slot in range(2):
++                button = KeyBindingButton(settings.bindings[action['id']][slot],
++                                          f"{action['switch']} {'primary' if not slot else 'alternative'} binding")
++                button.chosen.connect(lambda code, a=action['id'], s=slot: self.assign(a, s, code))
++                button.cleared.connect(lambda a=action['id'], s=slot: self.assign(a, s, 0))
++                button.rejected.connect(lambda message: self.status.setText(message))
++                self.table.setCellWidget(index, slot + 2, button)
++                pair.append(button)
++            self.buttons[action['id']] = pair
++        layout.addWidget(self.table, 1)
++        footer = QHBoxLayout()
++        reset = QPushButton('Restore defaults')
++        reset.setCursor(Qt.CursorShape.PointingHandCursor)
++        reset.clicked.connect(self.restore_defaults)
++        footer.addWidget(reset)
++        self.status = QLabel('Changes are saved automatically. Restart the game to apply.')
++        self.status.setWordWrap(True)
++        self.status.setStyleSheet('color: #0f766e; font-weight: 600; font-size: 12px;')
++        footer.addWidget(self.status, 1)
++        layout.addLayout(footer)
++        pad = 'Gamepad connected. ' if gamepad_connected else ''
++        shortcuts = QLabel(pad + 'Keyboard mapping does not change gamepad buttons. F11 / Alt+Enter: fullscreen.')
++        shortcuts.setWordWrap(True)
++        shortcuts.setStyleSheet('color: #475569; font-size: 11px; font-weight: 500;')
++        layout.addWidget(shortcuts)
++        self.setStyleSheet('''
++            QTableWidget {
++                background: #ffffff;
++                color: #0f172a;
++                gridline-color: #e2e8f0;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                font-size: 12px;
++                font-weight: 600;
++            }
++            QHeaderView::section {
++                background: #f1f5f9;
++                color: #0f172a;
++                font-weight: 700;
++                font-size: 12px;
++                padding: 8px;
++                border: none;
++                border-bottom: 1px solid #cbd5e1;
++            }
++            QPushButton, QComboBox, QDoubleSpinBox {
++                background: #ffffff;
++                color: #0f172a;
++                border: 1px solid #cbd5e1;
++                border-radius: 6px;
++                padding: 5px 10px;
++                font-weight: 600;
++                font-size: 12px;
++            }
++            QPushButton:hover, QComboBox:hover, QDoubleSpinBox:hover {
++                border-color: #0f766e;
++                background: #f8fafc;
++            }
++            QPushButton:focus, QComboBox:focus, QDoubleSpinBox:focus {
++                border-color: #0f766e;
++            }
++            QPushButton:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
++                background: #f1f5f9;
++                color: #94a3b8;
++                border-color: #e2e8f0;
++            }
++            QScrollBar:vertical {
++                background: #f1f5f9;
++                width: 10px;
++                margin: 0;
++            }
++            QScrollBar::handle:vertical {
++                background: #cbd5e1;
++                min-height: 28px;
++                border-radius: 5px;
++            }
++            QScrollBar::handle:vertical:hover {
++                background: #94a3b8;
++            }
++            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
++                height: 0;
++            }
++        ''')
++        self.refresh()
++        self.camera_mode.currentIndexChanged.connect(self.camera_changed)
++        self.mouse_backend.currentIndexChanged.connect(self.camera_changed)
++        self.prompt_mode.currentIndexChanged.connect(self.camera_changed)
++        self.look_deg_per_count.valueChanged.connect(self.camera_changed)
++        self.aim_multiplier.valueChanged.connect(self.camera_changed)
++        self.scope_multiplier.valueChanged.connect(self.camera_changed)
++        self.smooth_ms.currentIndexChanged.connect(self.camera_changed)
++        self.sensitivity.valueChanged.connect(self.camera_changed)
++        self.invert_y.toggled.connect(self.camera_changed)
++
++    def refresh(self):
++        for action in ACTIONS:
++            for slot, button in enumerate(self.buttons[action['id']]):
++                button.set_code(self.settings.bindings[action['id']][slot])
++                button.setEnabled(not (action['group'] == 'Camera' and self.settings.camera_mode == 'mouse'))
++        widgets = (self.camera_mode, self.mouse_backend, self.prompt_mode, self.look_deg_per_count,
++                   self.aim_multiplier, self.scope_multiplier, self.smooth_ms,
++                   self.sensitivity, self.invert_y)
++        for widget in widgets:
++            widget.blockSignals(True)
++        self.camera_mode.setCurrentIndex(self.camera_mode.findData(self.settings.camera_mode))
++        self.mouse_backend.setCurrentIndex(self.mouse_backend.findData(self.settings.mouse_backend))
++        self.prompt_mode.setCurrentIndex(max(0, self.prompt_mode.findData(self.settings.prompt_mode)))
++        self.look_deg_per_count.setValue(self.settings.look_deg_per_count)
++        self.aim_multiplier.setValue(self.settings.aim_multiplier)
++        self.scope_multiplier.setValue(self.settings.scope_multiplier)
++        self.smooth_ms.setCurrentIndex(max(0, self.smooth_ms.findData(self.settings.smooth_ms)))
++        self.sensitivity.setValue(self.settings.sensitivity)
++        self.invert_y.setChecked(self.settings.invert_y)
++        for widget in widgets:
++            widget.blockSignals(False)
++
++        is_mouse = self.settings.camera_mode == 'mouse'
++        is_native = self.settings.mouse_backend == 'native'
++        self.mouse_backend.setEnabled(is_mouse)
++        self.mouse_options.setVisible(is_mouse)
++        for w in (self.look_deg_per_count, self.aim_multiplier, self.scope_multiplier, self.smooth_ms):
++            w.setEnabled(is_mouse and is_native)
++        self.camera_hint.setMinimumHeight(self.camera_hint.fontMetrics().lineSpacing() * 2 + 8 if is_mouse else 0)
++        if not is_mouse:
++            self.camera_hint.setText('Camera uses the four right-stick bindings below. Mouse movement is ignored.')
++        elif is_native:
++            self.camera_hint.setText(
++                'Native PC direct mouse camera: 1:1 angle rotation per count (FPS-independent), '
++                'FOV-scaled bow/scope aiming, and automatic controller handoff. F8 releases/captures cursor.'
++            )
++        else:
++            self.camera_hint.setText(
++                'Compatibility mode: mouse emulates the Switch right stick with radial vector clamping. '
++                'F8 releases/captures the cursor.'
++            )
++
++    def commit(self, previous):
++        if not self.save():
++            self.settings.__dict__.update(InputSettings(previous).__dict__)
++            self.status.setText('Not saved. Previous settings restored.')
++        else:
++            self.status.setText('Saved. Restart the game to apply.')
++        self.refresh()
++
++    def assign(self, action_id, slot, code):
++        previous = self.settings.runtime_values()
++        conflicts = [(a['id'], s, a['switch']) for a in ACTIONS for s in range(2)
++                     if code and self.settings.bindings[a['id']][s] == code and (a['id'], s) != (action_id, slot)]
++        if conflicts:
++            answer = QMessageBox.question(self, 'Input already assigned',
++                f"{key_name(code)} is assigned to {conflicts[0][2]}. Move it to this binding?",
++                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
++            if answer != QMessageBox.StandardButton.Yes: return
++            for other, other_slot, _ in conflicts: self.settings.bindings[other][other_slot] = 0
++        self.settings.bindings[action_id][slot] = code
++        self.commit(previous)
++
++    def camera_changed(self, *_):
++        previous = self.settings.runtime_values()
++        self.settings.camera_mode = self.camera_mode.currentData()
++        self.settings.mouse_backend = self.mouse_backend.currentData()
++        self.settings.prompt_mode = self.prompt_mode.currentData()
++        self.settings.look_deg_per_count = self.look_deg_per_count.value()
++        self.settings.aim_multiplier = self.aim_multiplier.value()
++        self.settings.scope_multiplier = self.scope_multiplier.value()
++        self.settings.smooth_ms = int(self.smooth_ms.currentData())
++        self.settings.sensitivity = self.sensitivity.value()
++        self.settings.invert_y = self.invert_y.isChecked()
++        self.commit(previous)
++
++    def restore_defaults(self):
++        if QMessageBox.question(self, 'Restore controls', 'Restore all keyboard and camera defaults?',
++                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
++                               QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
++        previous = self.settings.runtime_values()
++        self.settings.__dict__.update(InputSettings().__dict__)
++        self.commit(previous)
+diff --git a/display_config.py b/display_config.py
+new file mode 100644
+index 0000000..de8dee0
+--- /dev/null
++++ b/display_config.py
+@@ -0,0 +1,181 @@
++"""Scene quality presets from the bundled NX Optimizer Options.json.
++
++Window size is a separate preference; presentation always preserves aspect.
++"""
++RESOLUTIONS = (
++    ("1280x720", "720p"), ("1600x900", "900p"), ("1920x1080", "1080p"),
++    ("2560x1440", "1440p"), ("3840x2160", "4K"),
++    ("6144x3456", "6K"), ("7680x4320", "8K"),
++)
++
++SHADOW_RESOLUTIONS = (
++    ("512", "512x", "Low / Handheld"),
++    ("1024", "1024x", "Medium / Docked (Default)"),
++    ("1536", "1536x", "High Quality"),
++    ("2048", "2048x", "Ultra Sharp"),
++    ("3072", "3072x", "Very High"),
++    ("4096", "4096x", "Cinematic 4K"),
++)
++
++XESS_SR_MODES = (
++    ("ultra_quality_plus", "Ultra Quality Plus (1.2x)"),
++    ("ultra_quality", "Ultra Quality (1.3x)"),
++    ("quality", "Quality (1.5x)"),
++    ("balanced", "Balanced (1.7x)"),
++    ("performance", "Performance (2.0x)"),
++    ("ultra_performance", "Ultra Performance (3.0x)"),
++    ("aa", "Native AA (1.0x)"),
++)
++
++XESS_FG_MULTIPLIERS = (
++    ("off", "Off (1x Native)"),
++    ("2", "2x Frame Generation"),
++    ("3", "3x Multi-Frame Gen"),
++    ("4", "4x Multi-Frame Gen"),
++)
++
++
++def xess_sr_enabled(cfg):
++    val = cfg.get("TOTK_XESS_SR", "0").strip().lower()
++    return val in ("1", "true", "yes", "on")
++
++
++def xess_sr_mode(cfg):
++    val = cfg.get("TOTK_XESS_SR_MODE", "quality").strip().lower()
++    if val in ("dlaa", "native_aa", "xess_aa"):
++        return "aa"
++    valid = dict(XESS_SR_MODES)
++    return val if val in valid else "quality"
++
++
++def xess_fg_enabled(cfg):
++    val = cfg.get("TOTK_XESS_FG", "0").strip().lower()
++    if val in ("2", "2x", "3", "3x", "4", "4x"):
++        return True
++    if val in ("1", "true", "yes", "on"):
++        mult = cfg.get("TOTK_XESS_FG_MULTIPLIER", "2").strip().lower()
++        return mult not in ("0", "1", "1x", "off", "false")
++    return False
++
++
++def xess_fg_multiplier(cfg):
++    fg = cfg.get("TOTK_XESS_FG", "0").strip().lower()
++    if fg in ("2", "2x"):
++        return "2"
++    if fg in ("3", "3x"):
++        return "3"
++    if fg in ("4", "4x"):
++        return "4"
++    val = cfg.get("TOTK_XESS_FG_MULTIPLIER", "2").strip().lower().rstrip("x")
++    return val if val in ("2", "3", "4") else "2"
++
++
++def shadow_resolution(cfg):
++    val = cfg.get("TOTK_SHADOW_RES", "1024")
++    return val if val in dict((r[0], r[1]) for r in SHADOW_RESOLUTIONS) else "1024"
++
++
++def xess_sr_render_resolution(target_scene, xess_sr_on, mode):
++    if not xess_sr_on or mode == "aa":
++        return target_scene
++    table = {
++        "ultra_quality_plus": {
++            "7680x4320": "6144x3456",
++            "6144x3456": "3840x2160",
++            "3840x2160": "2560x1440",
++            "2560x1440": "1920x1080",
++            "1920x1080": "1600x900",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++        "ultra_quality": {
++            "7680x4320": "6144x3456",
++            "6144x3456": "3840x2160",
++            "3840x2160": "2560x1440",
++            "2560x1440": "1920x1080",
++            "1920x1080": "1600x900",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++        "quality": {
++            "7680x4320": "3840x2160",
++            "6144x3456": "3840x2160",
++            "3840x2160": "2560x1440",
++            "2560x1440": "1920x1080",
++            "1920x1080": "1600x900",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++        "balanced": {
++            "7680x4320": "3840x2160",
++            "6144x3456": "2560x1440",
++            "3840x2160": "1920x1080",
++            "2560x1440": "1600x900",
++            "1920x1080": "1280x720",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++        "performance": {
++            "7680x4320": "2560x1440",
++            "6144x3456": "1920x1080",
++            "3840x2160": "1920x1080",
++            "2560x1440": "1280x720",
++            "1920x1080": "1280x720",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++        "ultra_performance": {
++            "7680x4320": "1920x1080",
++            "6144x3456": "1280x720",
++            "3840x2160": "1280x720",
++            "2560x1440": "1280x720",
++            "1920x1080": "1280x720",
++            "1600x900": "1280x720",
++            "1280x720": "1280x720",
++        },
++    }
++    mode_table = table.get(mode, table["quality"])
++    return mode_table.get(target_scene, target_scene)
++
++
++def scene_resolution(cfg):
++    if "TOTK_TARGET_WIDTH" in cfg and "TOTK_TARGET_HEIGHT" in cfg:
++        target_pair = f"{cfg.get('TOTK_TARGET_WIDTH', '')}x{cfg.get('TOTK_TARGET_HEIGHT', '')}"
++        if target_pair in dict(RESOLUTIONS):
++            return target_pair
++    # A partially specified new pair must not mix with the legacy pair.
++    prefix = "TOTK_INTERNAL_" if any(k in cfg for k in
++        ("TOTK_INTERNAL_WIDTH", "TOTK_INTERNAL_HEIGHT")) else "TOTK_"
++    pair = f"{cfg.get(prefix + 'WIDTH', '')}x{cfg.get(prefix + 'HEIGHT', '')}"
++    return pair if pair in dict(RESOLUTIONS) else "1920x1080"
++
++
++def window_dimension(value, default, low, high):
++    try:
++        result = int(value)
++        return result if low <= result <= high else default
++    except (TypeError, ValueError):
++        return default
++
++
++def display_values(scene, mode, fit, window_w, window_h, xess_sr_on=False, xess_sr_mode_name="quality"):
++    if scene not in dict(RESOLUTIONS):
++        raise ValueError("Unsupported scene resolution")
++    target_w, target_h = scene.split("x")
++    render_scene = xess_sr_render_resolution(scene, xess_sr_on, xess_sr_mode_name)
++    rw, rh = render_scene.split("x")
++    return {
++        "TOTK_WINDOW_MODE": mode,
++        "TOTK_TARGET_WIDTH": target_w,
++        "TOTK_TARGET_HEIGHT": target_h,
++        "TOTK_INTERNAL_WIDTH": rw,
++        "TOTK_INTERNAL_HEIGHT": rh,
++        # Mirror old keys so existing launch scripts retain their quality choice.
++        "TOTK_WIDTH": target_w,
++        "TOTK_HEIGHT": target_h,
++        "TOTK_WINDOW_WIDTH": str(window_w),
++        "TOTK_WINDOW_HEIGHT": str(window_h),
++        "TOTK_DOWNSCALE": "1" if fit else "0",
++        "TOTK_FIT_SCREEN": "1" if fit else "0",
++        "TOTK_DRS": "0",
++    }
+diff --git a/input_config.py b/input_config.py
+new file mode 100644
+index 0000000..f221324
+--- /dev/null
++++ b/input_config.py
+@@ -0,0 +1,148 @@
++"""Keyboard/mouse settings shared with the compiled SDL input layer through the .def file."""
++import csv
++import math
++from pathlib import Path
++
++_definition = Path(__file__).resolve().parent / 'src/host/keyboard_bindings.def'
++ACTIONS = []
++for _line in _definition.read_text(encoding='utf-8').splitlines():
++    if _line.startswith('INPUT_BINDING('):
++        _fields = next(csv.reader([_line[len('INPUT_BINDING('):-1]], skipinitialspace=True))
++        _id, _group, _switch, _description, _primary, _secondary, _legacy = _fields
++        ACTIONS.append(dict(id=_id, group=_group, switch=_switch, description=_description,
++                            defaults=(int(_primary), int(_secondary)), legacy=int(_legacy)))
++
++KEY_NAMES = {0: 'Unbound', **{4 + n: chr(65 + n) for n in range(26)},
++             **{30 + n: str(n + 1) for n in range(9)}, 39: '0',
++             40: 'Enter', 41: 'Escape', 42: 'Backspace', 43: 'Tab', 44: 'Space',
++             45: '-', 46: '=', 47: '[', 48: ']', 49: '\\', 51: ';', 52: "'",
++             53: '`', 54: ',', 55: '.', 56: '/', 57: 'Caps Lock',
++             **{58 + n: f'F{n + 1}' for n in range(12)},
++             70: 'Print Screen', 71: 'Scroll Lock', 72: 'Pause', 73: 'Insert',
++             74: 'Home', 75: 'Page Up', 76: 'Delete', 77: 'End', 78: 'Page Down',
++             79: 'Right', 80: 'Left', 81: 'Down', 82: 'Up', 83: 'Num Lock',
++             84: 'Num /', 85: 'Num *', 86: 'Num -', 87: 'Num +', 88: 'Num Enter',
++             **{89 + n: f'Num {n + 1}' for n in range(9)}, 98: 'Num 0', 99: 'Num .',
++             224: 'Left Ctrl', 225: 'Left Shift', 226: 'Left Alt',
++             228: 'Right Ctrl', 229: 'Right Shift', 230: 'Right Alt',
++             512: 'LMB', 513: 'RMB', 514: 'MMB'}
++INPUT_CODE_COUNT = 515  # 0..511 SDL scancodes, followed by three mouse buttons
++RESERVED_KEYS = {65, 68}  # F8: cursor capture; F11: fullscreen
++
++MOUSE_CAMERA_VERSION = 2
++VALID_MOUSE_BACKENDS = ('native', 'legacy_stick')
++VALID_PROMPT_MODES = ('auto', 'kb_mouse', 'controller')
++DEFAULT_PROMPT_MODE = 'auto'
++VALID_SMOOTH_MS = (0, 5, 10)
++DEFAULT_LOOK_DEG_PER_COUNT = 0.04
++DEFAULT_AIM_MULTIPLIER = 1.0
++DEFAULT_SCOPE_MULTIPLIER = 1.0
++DEFAULT_SMOOTH_MS = 0
++DEFAULT_LEGACY_SENSITIVITY = 1.0
++
++
++def key_name(code):
++    return KEY_NAMES.get(code, f'Key {code}')
++
++
++def _parse_bounded_float(raw, default, lo, hi):
++    try:
++        if raw is None:
++            return default
++        val = float(raw)
++        if not math.isfinite(val) or not (lo <= val <= hi):
++            return default
++        return val
++    except (ValueError, TypeError):
++        return default
++
++
++def _format_deg_per_count(val):
++    text = f'{val:.4f}'.rstrip('0').rstrip('.')
++    if '.' not in text:
++        text += '.0'
++    return text
++
++
++def _format_multiplier(val):
++    text = f'{val:.2f}'.rstrip('0').rstrip('.')
++    if '.' not in text:
++        text += '.0'
++    return text
++
++
++def is_legacy_camera_config(config):
++    """Return True if a non-empty config dictionary precedes camera version 2."""
++    if not config:
++        return False
++    return str(config.get('TOTK_MOUSE_CAMERA_VERSION', '')).strip() != str(MOUSE_CAMERA_VERSION)
++
++
++class InputSettings:
++    def __init__(self, config=None):
++        config = config or {}
++        self.bindings = {}
++        used = set()
++        for action in ACTIONS:
++            raw = config.get('TOTK_KEY_' + action['id'])
++            try:
++                pair = tuple(map(int, raw.split(','))) if raw is not None else action['defaults']
++                if len(pair) != 2 or any(k < 0 or k >= INPUT_CODE_COUNT or k in RESERVED_KEYS for k in pair):
++                    raise ValueError
++            except (ValueError, TypeError):
++                pair = action['defaults']
++            clean = []
++            for code in pair:
++                clean.append(0 if code in used else code)
++                if code:
++                    used.add(code)
++            self.bindings[action['id']] = clean
++
++        self.camera_mode = 'mouse' if config.get('TOTK_CAMERA_MODE') == 'mouse' else 'keys'
++        self.camera_version = MOUSE_CAMERA_VERSION
++
++        prompt_mode = config.get('TOTK_PROMPT_MODE', DEFAULT_PROMPT_MODE)
++        self.prompt_mode = prompt_mode if prompt_mode in VALID_PROMPT_MODES else DEFAULT_PROMPT_MODE
++
++        backend = config.get('TOTK_MOUSE_BACKEND', 'native')
++        self.mouse_backend = backend if backend in VALID_MOUSE_BACKENDS else 'native'
++
++        # Legacy TOTK_MOUSE_SENSITIVITY is never interpreted as degrees per count;
++        # it remains exclusively for the legacy_stick / compatibility path.
++        self.sensitivity = _parse_bounded_float(
++            config.get('TOTK_MOUSE_SENSITIVITY'), DEFAULT_LEGACY_SENSITIVITY, 0.1, 5.0
++        )
++        self.look_deg_per_count = _parse_bounded_float(
++            config.get('TOTK_MOUSE_LOOK_DEG_PER_COUNT'), DEFAULT_LOOK_DEG_PER_COUNT, 0.001, 1.0
++        )
++        self.aim_multiplier = _parse_bounded_float(
++            config.get('TOTK_MOUSE_AIM_MULTIPLIER'), DEFAULT_AIM_MULTIPLIER, 0.1, 2.0
++        )
++        self.scope_multiplier = _parse_bounded_float(
++            config.get('TOTK_MOUSE_SCOPE_MULTIPLIER'), DEFAULT_SCOPE_MULTIPLIER, 0.1, 2.0
++        )
++
++        try:
++            smooth_raw = int(config.get('TOTK_MOUSE_SMOOTH_MS', str(DEFAULT_SMOOTH_MS)))
++            self.smooth_ms = smooth_raw if smooth_raw in VALID_SMOOTH_MS else DEFAULT_SMOOTH_MS
++        except (ValueError, TypeError):
++            self.smooth_ms = DEFAULT_SMOOTH_MS
++
++        self.invert_y = config.get('TOTK_MOUSE_INVERT_Y') == '1'
++
++    def runtime_values(self):
++        result = {'TOTK_KEY_' + action['id']: ','.join(map(str, self.bindings[action['id']]))
++                  for action in ACTIONS}
++        result.update(
++            TOTK_CAMERA_MODE=self.camera_mode,
++            TOTK_PROMPT_MODE=self.prompt_mode,
++            TOTK_MOUSE_CAMERA_VERSION=str(MOUSE_CAMERA_VERSION),
++            TOTK_MOUSE_BACKEND=self.mouse_backend,
++            TOTK_MOUSE_LOOK_DEG_PER_COUNT=_format_deg_per_count(self.look_deg_per_count),
++            TOTK_MOUSE_AIM_MULTIPLIER=_format_multiplier(self.aim_multiplier),
++            TOTK_MOUSE_SCOPE_MULTIPLIER=_format_multiplier(self.scope_multiplier),
++            TOTK_MOUSE_SMOOTH_MS=str(self.smooth_ms),
++            TOTK_MOUSE_SENSITIVITY=f'{self.sensitivity:.2f}',
++            TOTK_MOUSE_INVERT_Y='1' if self.invert_y else '0',
++        )
++        return result
+diff --git a/prelauncher.py b/prelauncher.py
+new file mode 100644
+index 0000000..564b988
+--- /dev/null
++++ b/prelauncher.py
+@@ -0,0 +1,1866 @@
++import os
++import sys
++import re
++import ctypes
++import subprocess
++from pathlib import Path
++from PyQt6.QtWidgets import (
++    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
++    QLabel, QPushButton, QFrame, QStackedWidget, QListWidget, QListWidgetItem,
++    QGridLayout, QSizePolicy, QDialog, QTextEdit, QMessageBox, QProgressBar, QScrollArea, QSpinBox
++)
++from PyQt6.QtCore import Qt, QSize, QPoint, pyqtSignal, QThread
++from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QBrush, QPen, QPixmap, QPalette
++import qtawesome as qta
++from input_config import InputSettings
++from controls_widgets import ControlsPage
++from display_config import (
++    RESOLUTIONS, scene_resolution, window_dimension, display_values,
++    SHADOW_RESOLUTIONS, shadow_resolution,
++    XESS_SR_MODES, xess_sr_enabled, xess_sr_mode, xess_sr_render_resolution,
++    XESS_FG_MULTIPLIERS, xess_fg_enabled, xess_fg_multiplier
++)
++
++
++BASE_DIR = Path(__file__).resolve().parent
++BUILDER_DIR = BASE_DIR / "UltraTears-builder-0.1.0-windows-x86_64"
++if not (BASE_DIR / "UltraTears.exe").is_file() and BUILDER_DIR.is_dir():
++    BASE_DIR = BUILDER_DIR
++
++EXE_PATH = BASE_DIR / "UltraTears.exe"
++CFG_PATH = BASE_DIR / "ultratears.cfg"
++LOG_PATH = BASE_DIR / "ultratears.log"
++ROMFS_DIR = BASE_DIR / "data" / "romfs"
++EXEFS_DIR = BASE_DIR / "data" / "exefs"
++SAVES_DIR = BASE_DIR / "userdata"
++EMBLEM_PATH = BASE_DIR / "assets" / "zonai_emblem.jpg"
++
++
++class XINPUT_STATE(ctypes.Structure):
++    _fields_ = [("dwPacketNumber", ctypes.c_ulong), ("Gamepad", ctypes.c_ubyte * 16)]
++
++
++def is_controller_connected():
++    try:
++        xinput = getattr(ctypes.windll, "xinput1_4", None) or getattr(ctypes.windll, "xinput9_1_0", None)
++        if not xinput:
++            return False
++        state = XINPUT_STATE()
++        return xinput.XInputGetState(0, ctypes.byref(state)) == 0
++    except Exception:
++        return False
++
++
++def is_vulkan_available():
++    return Path("C:/Windows/System32/vulkan-1.dll").is_file()
++
++
++def read_config():
++    cfg = {}
++    if CFG_PATH.is_file():
++        for line in CFG_PATH.read_text(encoding="utf-8").splitlines():
++            line = line.strip()
++            if line and not line.startswith("#") and "=" in line:
++                k, v = line.split("=", 1)
++                cfg[k.strip()] = v.strip()
++    return cfg
++
++
++def write_config_values(values):
++    """Save a complete change, preserving unrelated paths and comments.
++    When migrating a pre-v2 config file to v2, keep a local .v1.bak backup."""
++    lines = []
++    found = set()
++    old_bytes = None
++    existing_version = None
++    obsolete_keys = {"TOTK_DLSS", "TOTK_DLSS_MODE", "TOTK_DLSS_PRESET"}
++    if CFG_PATH.is_file():
++        old_bytes = CFG_PATH.read_bytes()
++        for line in old_bytes.decode("utf-8", errors="replace").splitlines():
++            stripped = line.strip()
++            key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else None
++            if key in obsolete_keys:
++                continue
++            if key == "TOTK_MOUSE_CAMERA_VERSION":
++                existing_version = stripped.split("=", 1)[1].strip()
++            if key in values:
++                if key not in found:
++                    lines.append(f"{key}={values[key]}")
++                    found.add(key)
++            else:
++                lines.append(line)
++    lines.extend(f"{key}={value}" for key, value in values.items() if key not in found)
++    temporary = CFG_PATH.with_name(CFG_PATH.name + ".tmp")
++    try:
++        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
++        temporary.replace(CFG_PATH)
++        if old_bytes is not None and existing_version != "2" and values.get("TOTK_MOUSE_CAMERA_VERSION") == "2":
++            backup = CFG_PATH.with_name(CFG_PATH.name + ".v1.bak")
++            if not backup.exists():
++                backup.write_bytes(old_bytes)
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++class ShaderPrepareWorker(QThread):
++    progress_updated = pyqtSignal(int, int, float, int, int, int)
++    log_line = pyqtSignal(str)
++    finished = pyqtSignal(int)
++
++    def __init__(self, env):
++        super().__init__()
++        self.env = env
++        self.process = None
++        self._is_cancelled = False
++
++    def run(self):
++        log_file = None
++        try:
++            log_file = LOG_PATH.with_name("shader-prepare.log").open("w", encoding="utf-8")
++            self.process = subprocess.Popen(
++                [str(EXE_PATH), "--prepare-only"],
++                cwd=str(BASE_DIR),
++                env=self.env,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.STDOUT,
++                text=True,
++                errors="replace",
++                bufsize=1
++            )
++            prog_re = re.compile(r"\[shader-prepare\]\s+(\d+)/(\d+)\s+\(([\d.]+)%\)\s+-\s+cached:\s+(\d+),\s+compiled:\s+(\d+),\s+failed:\s+(\d+)")
++
++            for line in self.process.stdout:
++                log_file.write(line)
++                log_file.flush()
++                if self._is_cancelled:
++                    break
++                line_str = line.strip()
++                if not line_str:
++                    continue
++                self.log_line.emit(line_str)
++                m = prog_re.search(line_str)
++                if m:
++                    done, total, pct, cached, compiled, failed = m.groups()
++                    self.progress_updated.emit(int(done), int(total), float(pct), int(cached), int(compiled), int(failed))
++
++            self.process.wait()
++            self.finished.emit(self.process.returncode)
++        except Exception as e:
++            self.log_line.emit(f"Error: {e}")
++            if log_file:
++                log_file.write(f"Error: {e}\n")
++            self.finished.emit(1)
++        finally:
++            if log_file:
++                log_file.close()
++
++    def cancel(self):
++        self._is_cancelled = True
++        if self.process:
++            try:
++                self.process.terminate()
++                self.process.kill()
++            except Exception:
++                pass
++
++
++class ShaderPrepareDialog(QDialog):
++    def __init__(self, parent=None, env=None):
++        super().__init__(parent)
++        self.env = env or os.environ.copy()
++        self.setWindowTitle("Preparing Shaders - UltraTears")
++        self.setFixedSize(540, 260)
++        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
++        self.setStyleSheet("""
++            QDialog {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 12px;
++            }
++        """)
++
++        layout = QVBoxLayout(self)
++        layout.setContentsMargins(28, 24, 28, 24)
++        layout.setSpacing(14)
++
++        header_layout = QHBoxLayout()
++        icon_lbl = QLabel()
++        icon_lbl.setPixmap(qta.icon("fa5s.bolt", color="#0f766e").pixmap(28, 28))
++        header_layout.addWidget(icon_lbl)
++
++        title_layout = QVBoxLayout()
++        title_layout.setSpacing(2)
++        title_lbl = QLabel("Preparing Shaders")
++        title_lbl.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
++        sub_lbl = QLabel("Verifying Vulkan shaders and preparing known shader variants.")
++        sub_lbl.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        title_layout.addWidget(title_lbl)
++        title_layout.addWidget(sub_lbl)
++        header_layout.addLayout(title_layout)
++        header_layout.addStretch()
++        layout.addLayout(header_layout)
++
++        self.prog_bar = QProgressBar()
++        self.prog_bar.setRange(0, 1000)
++        self.prog_bar.setValue(0)
++        self.prog_bar.setTextVisible(False)
++        self.prog_bar.setFixedHeight(14)
++        self.prog_bar.setStyleSheet("""
++            QProgressBar {
++                background-color: #e2e8f0;
++                border: 1px solid #cbd5e1;
++                border-radius: 7px;
++            }
++            QProgressBar::chunk {
++                background-color: #0f766e;
++                border-radius: 6px;
++            }
++        """)
++        layout.addWidget(self.prog_bar)
++
++        self.status_lbl = QLabel("Initializing shader compiler...")
++        self.status_lbl.setStyleSheet("color: #0f172a; font-size: 13px; font-weight: 700;")
++        layout.addWidget(self.status_lbl)
++
++        self.details_lbl = QLabel("Scanning shaders directory...")
++        self.details_lbl.setStyleSheet("color: #475569; font-size: 12px; font-family: 'Consolas', monospace; font-weight: 600;")
++        layout.addWidget(self.details_lbl)
++
++        layout.addStretch()
++
++        btn_layout = QHBoxLayout()
++        btn_layout.addStretch()
++        self.cancel_btn = QPushButton("Cancel")
++        self.cancel_btn.setFixedSize(110, 36)
++        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.cancel_btn.setStyleSheet("""
++            QPushButton {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 6px;
++                color: #0f172a;
++                font-weight: 700;
++                font-size: 12px;
++            }
++            QPushButton:hover {
++                background-color: #fef2f2;
++                border-color: #dc2626;
++                color: #dc2626;
++            }
++        """)
++        self.cancel_btn.clicked.connect(self.on_cancel)
++        btn_layout.addWidget(self.cancel_btn)
++        layout.addLayout(btn_layout)
++
++        self.worker = ShaderPrepareWorker(self.env)
++        self.worker.progress_updated.connect(self.on_progress)
++        self.worker.finished.connect(self.on_finished)
++        self.worker.start()
++
++    def on_progress(self, done, total, pct, cached, compiled, failed):
++        self.prog_bar.setValue(int(pct * 10))
++        self.status_lbl.setText(f"{done:,} / {total:,} Shader Jobs Checked ({pct:.1f}%)")
++        self.details_lbl.setText(f"Cached: {cached:,}  |  Compiled: {compiled:,}  |  Failed: {failed:,}")
++
++    def on_finished(self, code):
++        if code == 0:
++            self.accept()
++        elif code == 2:
++            self.status_lbl.setText("Finished with shader failures")
++            self.details_lbl.setText("Some shaders failed. Details: shader-prepare.log")
++            self.cancel_btn.setText("Close")
++        else:
++            self.status_lbl.setText("Shader preparation failed")
++            self.details_lbl.setText("Preparation stopped. Details: shader-prepare.log")
++            self.cancel_btn.setText("Close")
++
++    def on_cancel(self):
++        self.worker.cancel()
++        self.reject()
++
++    def closeEvent(self, event):
++        self.worker.cancel()
++        super().closeEvent(event)
++
++
++class ToggleSwitch(QWidget):
++    toggled = pyqtSignal(bool)
++
++    def __init__(self, checked=False, parent=None, active_color="#0f766e", inactive_color="#cbd5e1"):
++        super().__init__(parent)
++        self._checked = checked
++        self._active_color = active_color
++        self._inactive_color = inactive_color
++        self.setFixedSize(46, 24)
++        self.setCursor(Qt.CursorShape.PointingHandCursor)
++
++    def isChecked(self):
++        return self._checked
++
++    def setChecked(self, val):
++        if self._checked != val:
++            self._checked = val
++            self.update()
++            self.toggled.emit(self._checked)
++
++    def mousePressEvent(self, event):
++        if event.button() == Qt.MouseButton.LeftButton:
++            self.setChecked(not self._checked)
++
++    def paintEvent(self, event):
++        painter = QPainter(self)
++        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
++
++        track_color = QColor(self._active_color) if self._checked else QColor(self._inactive_color)
++        painter.setBrush(QBrush(track_color))
++        painter.setPen(QPen(QColor("#0d9488" if self._checked else "#94a3b8"), 1.0))
++        painter.drawRoundedRect(1, 2, 44, 20, 10, 10)
++
++        thumb_x = 25 if self._checked else 3
++        painter.setBrush(QBrush(QColor("#ffffff")))
++        painter.setPen(QPen(QColor("#94a3b8" if not self._checked else "#0f766e"), 1.0))
++        painter.drawEllipse(thumb_x, 4, 16, 16)
++
++
++class SegmentedButtons(QFrame):
++    selectionChanged = pyqtSignal(str)
++
++    def __init__(self, options, active_key=None, parent=None):
++        super().__init__(parent)
++        self.options = options
++        self.active_key = active_key or (options[0][0] if options else "")
++        self.buttons = {}
++
++        self.setObjectName("SegmentedFrame")
++        self.setStyleSheet("""
++            #SegmentedFrame {
++                background-color: #f1f5f9;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                padding: 3px;
++            }
++        """)
++
++        layout = QHBoxLayout(self)
++        layout.setContentsMargins(3, 3, 3, 3)
++        layout.setSpacing(4)
++
++        for key, label in self.options:
++            btn = QPushButton(label)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
++            btn.setFixedHeight(32)
++            btn.clicked.connect(lambda checked, k=key: self.set_active(k))
++            self.buttons[key] = btn
++            layout.addWidget(btn)
++
++        self.update_styles()
++
++    def set_active(self, key):
++        if key in self.buttons and self.active_key != key:
++            self.active_key = key
++            self.update_styles()
++            self.selectionChanged.emit(key)
++
++    def update_styles(self):
++        for k, btn in self.buttons.items():
++            if k == self.active_key:
++                btn.setStyleSheet("""
++                    QPushButton {
++                        background-color: #0f766e;
++                        color: #ffffff;
++                        font-weight: 800;
++                        font-size: 12px;
++                        border: 1px solid #0d9488;
++                        border-radius: 6px;
++                        padding: 0 12px;
++                    }
++                """)
++            else:
++                btn.setStyleSheet("""
++                    QPushButton {
++                        background-color: transparent;
++                        color: #1e293b;
++                        font-weight: 700;
++                        font-size: 12px;
++                        border: none;
++                        border-radius: 6px;
++                        padding: 0 12px;
++                    }
++                    QPushButton:hover {
++                        background-color: #e2e8f0;
++                        color: #0f172a;
++                    }
++                """)
++
++
++class ReadyCheckItem(QFrame):
++    clicked = pyqtSignal()
++
++    def __init__(self, icon_name, text, icon_color="#0f766e", show_arrow=False, has_action=False):
++        super().__init__()
++        self.has_action = has_action
++        if has_action:
++            self.setCursor(Qt.CursorShape.PointingHandCursor)
++
++        self.setStyleSheet("""
++            ReadyCheckItem {
++                background-color: #f8fafc;
++                border: 1px solid #e2e8f0;
++                border-radius: 6px;
++                padding: 4px 8px;
++            }
++            ReadyCheckItem:hover {
++                background-color: #f1f5f9;
++                border-color: #cbd5e1;
++            }
++        """)
++
++        layout = QHBoxLayout(self)
++        layout.setContentsMargins(8, 6, 8, 6)
++        layout.setSpacing(10)
++
++        icon_lbl = QLabel()
++        icon_lbl.setPixmap(qta.icon(icon_name, color=icon_color).pixmap(15, 15))
++        icon_lbl.setStyleSheet("border: none; background: transparent;")
++        layout.addWidget(icon_lbl)
++
++        self.text_lbl = QLabel(text)
++        self.text_lbl.setStyleSheet("color: #0f172a; font-size: 12px; font-weight: 600; border: none; background: transparent;")
++        layout.addWidget(self.text_lbl, 1)
++
++        if show_arrow:
++            arrow_lbl = QLabel()
++            arrow_lbl.setPixmap(qta.icon("fa5s.chevron-right", color="#475569").pixmap(11, 11))
++            arrow_lbl.setStyleSheet("border: none; background: transparent;")
++            layout.addWidget(arrow_lbl)
++
++    def set_text(self, text):
++        self.text_lbl.setText(text)
++
++    def mousePressEvent(self, event):
++        if self.has_action and event.button() == Qt.MouseButton.LeftButton:
++            self.clicked.emit()
++
++
++class ModeCard(QFrame):
++    def __init__(self, mode_id, title, desc, icon_name, is_selected=False, on_select=None):
++        super().__init__()
++        self.mode_id = mode_id
++        self.on_select = on_select
++        self.is_selected = is_selected
++        self.icon_name = icon_name
++
++        self.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.setObjectName("ModeCard")
++
++        layout = QHBoxLayout(self)
++        layout.setContentsMargins(16, 12, 16, 12)
++        layout.setSpacing(14)
++
++        self.icon_lbl = QLabel()
++        self.icon_lbl.setStyleSheet("border: none; background: transparent;")
++        layout.addWidget(self.icon_lbl)
++
++        text_vbox = QVBoxLayout()
++        text_vbox.setSpacing(2)
++        self.title_lbl = QLabel(title)
++        self.title_lbl.setObjectName("ModeTitle")
++        text_vbox.addWidget(self.title_lbl)
++
++        self.desc_lbl = QLabel(desc)
++        self.desc_lbl.setObjectName("ModeDesc")
++        text_vbox.addWidget(self.desc_lbl)
++        layout.addLayout(text_vbox, 1)
++
++        self.radio_lbl = QLabel()
++        self.radio_lbl.setStyleSheet("border: none; background: transparent;")
++        layout.addWidget(self.radio_lbl)
++
++        self.update_style()
++
++    def set_selected(self, selected):
++        self.is_selected = selected
++        self.update_style()
++
++    def update_style(self):
++        color = "#0f766e" if self.is_selected else "#64748b"
++        self.radio_lbl.setPixmap(qta.icon("fa5s.dot-circle" if self.is_selected else "fa5s.circle", color=color).pixmap(16, 16))
++        self.icon_lbl.setPixmap(qta.icon(self.icon_name, color="#0f766e" if self.is_selected else "#334155").pixmap(22, 22))
++
++        if self.is_selected:
++            self.setStyleSheet("""
++                #ModeCard {
++                    background-color: #f0fdfa;
++                    border: 2px solid #0f766e;
++                    border-radius: 8px;
++                }
++                #ModeTitle { font-size: 13px; font-weight: 800; color: #0f766e; border: none; background: transparent; }
++                #ModeDesc { font-size: 12px; font-weight: 500; color: #134e4a; border: none; background: transparent; }
++            """)
++        else:
++            self.setStyleSheet("""
++                #ModeCard {
++                    background-color: #ffffff;
++                    border: 1px solid #cbd5e1;
++                    border-radius: 8px;
++                }
++                #ModeCard:hover {
++                    background-color: #f8fafc;
++                    border-color: #94a3b8;
++                }
++                #ModeTitle { font-size: 13px; font-weight: 700; color: #0f172a; border: none; background: transparent; }
++                #ModeDesc { font-size: 12px; font-weight: 500; color: #334155; border: none; background: transparent; }
++            """)
++
++    def mousePressEvent(self, event):
++        if event.button() == Qt.MouseButton.LeftButton and self.on_select:
++            self.on_select(self.mode_id)
++
++
++class ResChip(QPushButton):
++    def __init__(self, res_id, label, is_selected=False, on_select=None):
++        super().__init__(label)
++        self.res_id = res_id
++        self.on_select = on_select
++        self.is_selected = is_selected
++        self.setFixedHeight(30)
++        self.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.clicked.connect(lambda: self.on_select(self.res_id) if self.on_select else None)
++        self.update_style()
++
++    def set_selected(self, val):
++        self.is_selected = val
++        self.update_style()
++
++    def update_style(self):
++        if self.is_selected:
++            self.setStyleSheet("""
++                QPushButton {
++                    background-color: #0f766e;
++                    color: #ffffff;
++                    font-weight: 800;
++                    font-size: 11px;
++                    border: 1px solid #0d9488;
++                    border-radius: 6px;
++                    padding: 0 10px;
++                }
++            """)
++        else:
++            self.setStyleSheet("""
++                QPushButton {
++                    background-color: #ffffff;
++                    color: #0f172a;
++                    font-weight: 700;
++                    font-size: 11px;
++                    border: 1px solid #cbd5e1;
++                    border-radius: 6px;
++                    padding: 0 10px;
++                }
++                QPushButton:hover {
++                    background-color: #f1f5f9;
++                    color: #0f766e;
++                    border-color: #0f766e;
++                }
++            """)
++
++
++class LogDialog(QDialog):
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.setWindowTitle("Engine Log - UltraTears")
++        self.resize(760, 490)
++        self.setStyleSheet("background-color: #f8fafc; color: #0f172a;")
++
++        layout = QVBoxLayout(self)
++        layout.setContentsMargins(20, 20, 20, 20)
++        layout.setSpacing(12)
++
++        header = QLabel("Runtime & Console Output")
++        header.setStyleSheet("font-size: 16px; font-weight: 800; color: #0f172a;")
++        layout.addWidget(header)
++
++        self.text_edit = QTextEdit()
++        self.text_edit.setReadOnly(True)
++        self.text_edit.setStyleSheet("""
++            QTextEdit {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                color: #0f172a;
++                font-family: 'Consolas', 'Courier New', monospace;
++                font-size: 12px;
++                padding: 12px;
++            }
++        """)
++        layout.addWidget(self.text_edit)
++
++        close_btn = QPushButton("Close")
++        close_btn.setFixedHeight(34)
++        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        close_btn.setStyleSheet("""
++            QPushButton {
++                background-color: #0f766e;
++                border: 1px solid #0d9488;
++                border-radius: 6px;
++                color: #ffffff;
++                font-weight: 700;
++                padding: 0 22px;
++            }
++            QPushButton:hover { background-color: #0d9488; }
++        """)
++        close_btn.clicked.connect(self.close)
++        layout.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignRight)
++
++        self.load_log()
++
++    def load_log(self):
++        if LOG_PATH.is_file():
++            text = LOG_PATH.read_text(encoding="utf-8", errors="ignore")
++            self.text_edit.setPlainText(text if text.strip() else "[log] Engine log file is empty. Launch the game to capture runtime logs.")
++        else:
++            self.text_edit.setPlainText("[log] No previous game session log found. Launch the game to generate runtime output.")
++
++
++class PrelauncherWindow(QMainWindow):
++    def __init__(self):
++        super().__init__()
++        self.setWindowTitle("Tears of the Kingdom - PC Port")
++        self.resize(1100, 720)
++        self.setMinimumSize(1000, 650)
++
++        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
++        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
++
++        self._drag_pos = QPoint()
++
++        # Load config
++        self.cfg = read_config()
++        self.input_settings = InputSettings(self.cfg)
++        self.selected_window_mode = self.cfg.get("TOTK_WINDOW_MODE", "borderless")
++        self.selected_res_id = scene_resolution(self.cfg)
++        self.window_width = window_dimension(self.cfg.get("TOTK_WINDOW_WIDTH"), 1280, 640, 7680)
++        self.window_height = window_dimension(self.cfg.get("TOTK_WINDOW_HEIGHT"), 720, 360, 4320)
++        self.fit_window = self.cfg.get("TOTK_FIT_SCREEN", self.cfg.get("TOTK_DOWNSCALE", "1")) != "0"
++
++        self.fps_goal = ("smooth" if self.cfg.get("TOTK_UNCAPPED") == "1" else
++                         "quiet" if self.cfg.get("TOTK_OPERATION_MODE") == "handheld" else "balanced")
++        saved_limit = self.cfg.get("launcher_fps_limit", self.cfg.get("TOTK_UNCAPPED_HZ", "60"))
++        self.fps_limit = int(saved_limit) if saved_limit in ("60", "90", "120") else 60
++
++        self.selected_shadow_res = shadow_resolution(self.cfg)
++        self.xess_sr_on = xess_sr_enabled(self.cfg)
++        self.selected_xess_sr_mode = xess_sr_mode(self.cfg)
++        self.xess_fg_on = xess_fg_enabled(self.cfg)
++        self.selected_xess_fg_mult = xess_fg_multiplier(self.cfg)
++        self.res_chips = []
++        self.shadow_chips = []
++        self.detailed_shadow_btns = {}
++        self.detailed_xess_sr_btns = {}
++        self.detailed_xess_fg_btns = {}
++        self.mode_cards = []
++
++        self.apply_theme()
++        self.init_ui()
++        self.update_fps_labels()
++
++    def apply_theme(self):
++        self.setStyleSheet("""
++            QMainWindow {
++                background-color: #f1f5f9;
++            }
++            QWidget {
++                color: #0f172a;
++                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
++            }
++            #RootFrame {
++                background-color: #f1f5f9;
++                border: 1px solid #cbd5e1;
++            }
++            #TitleBar {
++                background-color: #ffffff;
++                border-bottom: 1px solid #cbd5e1;
++            }
++            #SidebarFrame {
++                background-color: #ffffff;
++                border-right: 1px solid #cbd5e1;
++            }
++            #NavList {
++                background-color: transparent;
++                border: none;
++                outline: none;
++            }
++            #NavList::item {
++                height: 42px;
++                padding-left: 14px;
++                margin: 3px 6px;
++                border-radius: 8px;
++                color: #334155;
++                font-size: 13px;
++                font-weight: 700;
++            }
++            #NavList::item:hover {
++                background-color: #f1f5f9;
++                color: #0f172a;
++            }
++            #NavList::item:selected {
++                background-color: #f0fdfa;
++                color: #0f766e;
++                font-weight: 800;
++                border: 1px solid #99f6e4;
++                border-left: 4px solid #0f766e;
++            }
++            #CardFrame {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 10px;
++                padding: 16px;
++            }
++            #FooterBar {
++                background-color: #ffffff;
++                border-top: 1px solid #cbd5e1;
++            }
++            QScrollBar:vertical {
++                background: #f1f5f9;
++                width: 10px;
++                margin: 0;
++            }
++            QScrollBar::handle:vertical {
++                background: #cbd5e1;
++                min-height: 30px;
++                border-radius: 5px;
++            }
++            QScrollBar::handle:vertical:hover {
++                background: #94a3b8;
++            }
++            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
++                height: 0;
++            }
++        """)
++
++    def init_ui(self):
++        root_widget = QWidget()
++        root_widget.setObjectName("RootFrame")
++        self.setCentralWidget(root_widget)
++
++        root_vbox = QVBoxLayout(root_widget)
++        root_vbox.setContentsMargins(0, 0, 0, 0)
++        root_vbox.setSpacing(0)
++
++        # 1. Custom Titlebar
++        root_vbox.addWidget(self.create_titlebar())
++
++        # 2. Body: Sidebar + Main Area
++        body_hbox = QHBoxLayout()
++        body_hbox.setContentsMargins(0, 0, 0, 0)
++        body_hbox.setSpacing(0)
++
++        body_hbox.addWidget(self.create_sidebar())
++
++        self.pages_stack = QStackedWidget()
++        self.pages_stack.addWidget(self.create_play_page())
++        self.pages_stack.addWidget(self.create_graphics_page())
++        self.pages_stack.addWidget(self.create_controls_page())
++        self.pages_stack.addWidget(self.create_game_files_page())
++        self.pages_stack.addWidget(self.create_mods_page())
++        self.pages_stack.addWidget(self.create_saves_page())
++
++        body_hbox.addWidget(self.pages_stack, 1)
++        root_vbox.addLayout(body_hbox, 1)
++
++        # 3. Bottom Action Bar
++        root_vbox.addWidget(self.create_footer())
++
++    def create_titlebar(self):
++        bar = QFrame()
++        bar.setObjectName("TitleBar")
++        bar.setFixedHeight(38)
++
++        layout = QHBoxLayout(bar)
++        layout.setContentsMargins(16, 0, 10, 0)
++        layout.setSpacing(10)
++
++        icon_lbl = QLabel()
++        icon_lbl.setPixmap(qta.icon("fa5s.dragon", color="#0f766e").pixmap(15, 15))
++        layout.addWidget(icon_lbl)
++
++        title_lbl = QLabel("UltraTears  |  Tears of the Kingdom PC Port")
++        title_lbl.setStyleSheet("color: #0f172a; font-size: 12px; font-weight: 800;")
++        layout.addWidget(title_lbl)
++
++        layout.addStretch(1)
++
++        min_btn = QPushButton()
++        min_btn.setFixedSize(30, 26)
++        min_btn.setIcon(qta.icon("fa5s.minus", color="#334155"))
++        min_btn.setIconSize(QSize(11, 11))
++        min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        min_btn.setStyleSheet("""
++            QPushButton { background: transparent; border: none; border-radius: 5px; }
++            QPushButton:hover { background-color: #e2e8f0; }
++        """)
++        min_btn.clicked.connect(self.showMinimized)
++        layout.addWidget(min_btn)
++
++        close_btn = QPushButton()
++        close_btn.setFixedSize(30, 26)
++        close_btn.setIcon(qta.icon("fa5s.times", color="#334155"))
++        close_btn.setIconSize(QSize(13, 13))
++        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        close_btn.setStyleSheet("""
++            QPushButton { background: transparent; border: none; border-radius: 5px; }
++            QPushButton:hover { background-color: #fee2e2; }
++        """)
++        close_btn.clicked.connect(self.close)
++        layout.addWidget(close_btn)
++
++        return bar
++
++    def mousePressEvent(self, event):
++        if event.button() == Qt.MouseButton.LeftButton and event.position().y() <= 40:
++            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
++            event.accept()
++
++    def mouseMoveEvent(self, event):
++        if event.buttons() == Qt.MouseButton.LeftButton and not self._drag_pos.isNull():
++            self.move(event.globalPosition().toPoint() - self._drag_pos)
++            event.accept()
++
++    def mouseReleaseEvent(self, event):
++        self._drag_pos = QPoint()
++
++    def create_sidebar(self):
++        sidebar = QFrame()
++        sidebar.setObjectName("SidebarFrame")
++        sidebar.setFixedWidth(235)
++
++        vbox = QVBoxLayout(sidebar)
++        vbox.setContentsMargins(14, 20, 14, 16)
++        vbox.setSpacing(16)
++
++        # Brand header
++        brand_hbox = QHBoxLayout()
++        brand_hbox.setSpacing(10)
++
++        brand_icon = QLabel()
++        brand_icon.setPixmap(qta.icon("fa5s.dragon", color="#0f766e").pixmap(26, 26))
++        brand_hbox.addWidget(brand_icon)
++
++        brand_text_vbox = QVBoxLayout()
++        brand_text_vbox.setSpacing(1)
++
++        brand_name = QLabel("TEARS OF THE KINGDOM")
++        brand_name.setStyleSheet("font-size: 12px; font-weight: 800; color: #0f172a; letter-spacing: 0.4px;")
++        brand_text_vbox.addWidget(brand_name)
++
++        brand_sub = QLabel("ULTRATEARS LAUNCHER")
++        brand_sub.setStyleSheet("font-size: 10px; font-weight: 800; color: #0f766e; letter-spacing: 0.8px;")
++        brand_text_vbox.addWidget(brand_sub)
++
++        brand_hbox.addLayout(brand_text_vbox, 1)
++        vbox.addLayout(brand_hbox)
++
++        divider = QFrame()
++        divider.setFixedHeight(1)
++        divider.setStyleSheet("background-color: #e2e8f0; border: none;")
++        vbox.addWidget(divider)
++
++        # Navigation Menu
++        self.nav_list = QListWidget()
++        self.nav_list.setObjectName("NavList")
++        self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
++        self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
++
++        menu_items = [
++            ("Overview & Play", "fa5s.play", 0),
++            ("Picture & Performance", "fa5s.tv", 1),
++            ("Controls & Input", "fa5s.gamepad", 2),
++            ("Game Files & Shaders", "fa5s.folder-open", 3),
++            ("Mods", "fa5s.puzzle-piece", 4),
++            ("Save Data", "fa5s.save", 5),
++        ]
++
++        for text, icon, _ in menu_items:
++            item = QListWidgetItem(qta.icon(icon, color="#0f766e"), text)
++            item.setSizeHint(QSize(0, 42))
++            self.nav_list.addItem(item)
++
++        self.nav_list.setCurrentRow(0)
++        self.nav_list.currentRowChanged.connect(self.on_nav_changed)
++        vbox.addWidget(self.nav_list, 1)
++
++        # Quick Shader Precompile button in sidebar bottom
++        shader_btn = QPushButton("Prepare Shaders")
++        shader_btn.setIcon(qta.icon("fa5s.bolt", color="#0f766e"))
++        shader_btn.setFixedHeight(38)
++        shader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        shader_btn.setStyleSheet("""
++            QPushButton {
++                background-color: #f8fafc;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                color: #0f172a;
++                font-weight: 700;
++                font-size: 12px;
++            }
++            QPushButton:hover {
++                background-color: #f0fdfa;
++                border-color: #0f766e;
++                color: #0f766e;
++            }
++        """)
++        shader_btn.clicked.connect(self.open_shader_precompile)
++        vbox.addWidget(shader_btn)
++
++        return sidebar
++
++    def on_nav_changed(self, row):
++        page_map = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
++        self.pages_stack.setCurrentIndex(page_map.get(row, 0))
++
++    def switch_page(self, idx):
++        self.nav_list.setCurrentRow(idx)
++
++    def create_play_page(self):
++        page = QWidget()
++        vbox = QVBoxLayout(page)
++        vbox.setContentsMargins(28, 22, 28, 20)
++        vbox.setSpacing(18)
++
++        # Top Hero Banner Card
++        hero_card = QFrame()
++        hero_card.setStyleSheet("""
++            QFrame {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 10px;
++            }
++        """)
++        hero_hbox = QHBoxLayout(hero_card)
++        hero_hbox.setContentsMargins(22, 18, 22, 18)
++        hero_hbox.setSpacing(20)
++
++        hero_left = QVBoxLayout()
++        hero_left.setSpacing(6)
++
++        game_title = QLabel("THE LEGEND OF ZELDA: TEARS OF THE KINGDOM")
++        game_title.setStyleSheet("""
++            font-size: 22px;
++            font-weight: 800;
++            color: #0f172a;
++            letter-spacing: 0.4px;
++            border: none;
++        """)
++        hero_left.addWidget(game_title)
++
++        sub_desc = QLabel("Native Windows x86_64 Recompilation  |  Vulkan 1.3 Renderer  |  Intel XeSS Upscaler & Frame Generation")
++        sub_desc.setStyleSheet("color: #334155; font-size: 12px; font-weight: 600; border: none;")
++        hero_left.addWidget(sub_desc)
++
++        chips_hbox = QHBoxLayout()
++        chips_hbox.setSpacing(8)
++
++        chip1 = QLabel("Title ID: 0100F2C0115B6000 (v1.4.3)")
++        chip1.setStyleSheet("""
++            background-color: #f1f5f9;
++            border: 1px solid #cbd5e1;
++            border-radius: 6px;
++            padding: 4px 10px;
++            font-size: 11px;
++            font-weight: 700;
++            color: #0f172a;
++        """)
++        chips_hbox.addWidget(chip1)
++
++        chip2 = QLabel("Vulkan 1.3 Native")
++        chip2.setStyleSheet("""
++            background-color: #f0fdfa;
++            border: 1px solid #0f766e;
++            border-radius: 6px;
++            padding: 4px 10px;
++            font-size: 11px;
++            font-weight: 800;
++            color: #0f766e;
++        """)
++        chips_hbox.addWidget(chip2)
++
++        chip3 = QLabel("Intel XeSS 2.1 Ready")
++        chip3.setStyleSheet("""
++            background-color: #eff6ff;
++            border: 1px solid #1d4ed8;
++            border-radius: 6px;
++            padding: 4px 10px;
++            font-size: 11px;
++            font-weight: 800;
++            color: #1d4ed8;
++        """)
++        chips_hbox.addWidget(chip3)
++        chips_hbox.addStretch(1)
++
++        hero_left.addLayout(chips_hbox)
++        hero_hbox.addLayout(hero_left, 1)
++
++        emblem_lbl = QLabel()
++        emblem_lbl.setStyleSheet("border: none; background: transparent;")
++        if EMBLEM_PATH.is_file():
++            pm = QPixmap(str(EMBLEM_PATH)).scaled(88, 88, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
++            emblem_lbl.setPixmap(pm)
++        else:
++            emblem_lbl.setPixmap(qta.icon("fa5s.dragon", color="#0f766e").pixmap(68, 68))
++
++        hero_hbox.addWidget(emblem_lbl, 0, Qt.AlignmentFlag.AlignCenter)
++        vbox.addWidget(hero_card)
++
++        # Middle Cards Area
++        cards_hbox = QHBoxLayout()
++        cards_hbox.setSpacing(18)
++
++        # Left Card: SYSTEM & GAME STATUS
++        ready_card = QFrame()
++        ready_card.setObjectName("CardFrame")
++        rc_vbox = QVBoxLayout(ready_card)
++        rc_vbox.setContentsMargins(18, 16, 18, 16)
++        rc_vbox.setSpacing(8)
++
++        rc_title = QLabel("System & Game Verification")
++        rc_title.setStyleSheet("color: #0f172a; font-size: 15px; font-weight: 800;")
++        rc_vbox.addWidget(rc_title)
++
++        exe_ok = EXE_PATH.is_file()
++        rc1 = ReadyCheckItem(
++            "fa5s.check-circle" if exe_ok else "fa5s.exclamation-circle",
++            "Game Executable: UltraTears.exe (Ready)" if exe_ok else "Game Executable: UltraTears.exe not found",
++            icon_color="#059669" if exe_ok else "#dc2626"
++        )
++        rc_vbox.addWidget(rc1)
++
++        romfs_ok = ROMFS_DIR.is_dir()
++        rc2 = ReadyCheckItem(
++            "fa5s.check" if romfs_ok else "fa5s.exclamation-triangle",
++            "Game Data: data/romfs directory verified" if romfs_ok else "Game Data: data/romfs directory missing",
++            icon_color="#059669" if romfs_ok else "#d97706"
++        )
++        rc_vbox.addWidget(rc2)
++
++        exefs_ok = EXEFS_DIR.is_dir()
++        rc3 = ReadyCheckItem(
++            "fa5s.check" if exefs_ok else "fa5s.exclamation-triangle",
++            "Game Binaries: data/exefs (v1.4.3) verified" if exefs_ok else "Game Binaries: data/exefs missing",
++            icon_color="#059669" if exefs_ok else "#d97706"
++        )
++        rc_vbox.addWidget(rc3)
++
++        mode_text = "Borderless Fullscreen" if self.selected_window_mode == "borderless" else ("Exclusive Fullscreen" if self.selected_window_mode == "fullscreen" else "Windowed")
++        self.rc_display_item = ReadyCheckItem("fa5s.tv", f"Display: {mode_text} at {self.selected_res_id}", icon_color="#0f766e", show_arrow=True, has_action=True)
++        self.rc_display_item.clicked.connect(lambda: self.switch_page(1))
++        rc_vbox.addWidget(self.rc_display_item)
++
++        vk_ok = is_vulkan_available()
++        rc5 = ReadyCheckItem(
++            "fa5s.microchip" if vk_ok else "fa5s.exclamation-triangle",
++            "Graphics API: Vulkan 1.3 driver verified" if vk_ok else "Graphics API: vulkan-1.dll not found",
++            icon_color="#059669" if vk_ok else "#dc2626"
++        )
++        rc_vbox.addWidget(rc5)
++
++        pad_ok = is_controller_connected()
++        rc6 = ReadyCheckItem(
++            "fa5s.gamepad",
++            "Input: Gamepad detected (Ready)" if pad_ok else "Input: Keyboard & Mouse active",
++            icon_color="#059669" if pad_ok else "#0f766e",
++            show_arrow=True,
++            has_action=True
++        )
++        rc6.clicked.connect(lambda: self.switch_page(2))
++        rc_vbox.addWidget(rc6)
++
++        rc_vbox.addStretch(1)
++        cards_hbox.addWidget(ready_card, 1)
++
++        # Right Card: QUICK PERFORMANCE & PICTURE SETUP
++        goal_card = QFrame()
++        goal_card.setObjectName("CardFrame")
++        gc_vbox = QVBoxLayout(goal_card)
++        gc_vbox.setContentsMargins(18, 16, 18, 16)
++        gc_vbox.setSpacing(10)
++
++        gc_title = QLabel("Performance & Picture Quick Setup")
++        gc_title.setStyleSheet("color: #0f172a; font-size: 15px; font-weight: 800;")
++        gc_vbox.addWidget(gc_title)
++
++        fps_opts = [("smooth", "Smooth"), ("balanced", "Balanced"), ("quiet", "Quiet")]
++        self.fps_seg = SegmentedButtons(fps_opts, active_key=self.fps_goal)
++        self.fps_seg.selectionChanged.connect(self.on_fps_goal_changed)
++        gc_vbox.addWidget(self.fps_seg)
++
++        self.fps_limit_seg = SegmentedButtons(
++            [("60", "60 FPS"), ("90", "90 FPS"), ("120", "120 FPS")], active_key=str(self.fps_limit))
++        self.fps_limit_seg.setAccessibleName("Smooth frame rate limit")
++        self.fps_limit_seg.selectionChanged.connect(self.on_fps_limit_changed)
++        gc_vbox.addWidget(self.fps_limit_seg)
++
++        self.goal_desc_lbl = QLabel("Higher frame rates with real-time game and animation clocks.")
++        self.goal_desc_lbl.setWordWrap(True)
++        self.goal_desc_lbl.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        gc_vbox.addWidget(self.goal_desc_lbl)
++
++        self.goal_exp_lbl = QLabel(f"Target: up to {self.fps_limit} FPS at {self.selected_res_id}")
++        self.goal_exp_lbl.setStyleSheet("color: #0f766e; font-size: 12px; font-weight: 800;")
++        gc_vbox.addWidget(self.goal_exp_lbl)
++
++        # Fullscreen Toggle switch
++        fs_hbox = QHBoxLayout()
++        self.fs_switch = ToggleSwitch(checked=(self.selected_window_mode != "windowed"), active_color="#0f766e")
++        self.fs_switch.toggled.connect(self.on_fullscreen_switch_toggled)
++        fs_hbox.addWidget(self.fs_switch)
++
++        fs_text = QLabel("Fullscreen Display Mode")
++        fs_text.setStyleSheet("color: #0f172a; font-size: 12px; font-weight: 700;")
++        fs_hbox.addWidget(fs_text)
++        fs_hbox.addStretch(1)
++        gc_vbox.addLayout(fs_hbox)
++
++        # Resolution quick chips
++        res_vbox = QVBoxLayout()
++        res_vbox.setSpacing(4)
++        res_quick_lbl = QLabel("Target Scene Resolution")
++        res_quick_lbl.setStyleSheet("color: #0f172a; font-size: 12px; font-weight: 700;")
++        res_vbox.addWidget(res_quick_lbl)
++
++        res_chips_hbox = QHBoxLayout()
++        res_chips_hbox.setSpacing(6)
++        self.res_chips = []
++        res_list = RESOLUTIONS[:5]
++        for res_id, label in res_list:
++            chip = ResChip(res_id, label, is_selected=(res_id == self.selected_res_id), on_select=self.set_resolution)
++            self.res_chips.append(chip)
++            res_chips_hbox.addWidget(chip)
++
++        res_vbox.addLayout(res_chips_hbox)
++        gc_vbox.addLayout(res_vbox)
++
++        # Shadow resolution quick chips
++        shadow_vbox = QVBoxLayout()
++        shadow_vbox.setSpacing(4)
++        shadow_quick_lbl = QLabel("Shadow Map Resolution")
++        shadow_quick_lbl.setStyleSheet("color: #0f172a; font-size: 12px; font-weight: 700;")
++        shadow_vbox.addWidget(shadow_quick_lbl)
++
++        shadow_chips_hbox = QHBoxLayout()
++        shadow_chips_hbox.setSpacing(6)
++        self.shadow_chips = []
++        for sid, label, _ in SHADOW_RESOLUTIONS:
++            chip = ResChip(sid, label, is_selected=(sid == self.selected_shadow_res), on_select=self.set_shadow_resolution)
++            self.shadow_chips.append(chip)
++            shadow_chips_hbox.addWidget(chip)
++
++        shadow_vbox.addLayout(shadow_chips_hbox)
++        gc_vbox.addLayout(shadow_vbox)
++        gc_vbox.addStretch(1)
++
++        cards_hbox.addWidget(goal_card, 1)
++        vbox.addLayout(cards_hbox, 1)
++
++        return page
++
++    def create_graphics_page(self):
++        page = QWidget()
++        palette = page.palette()
++        palette.setColor(QPalette.ColorRole.Window, QColor("#f1f5f9"))
++        page.setPalette(palette)
++        page.setAutoFillBackground(True)
++        vbox = QVBoxLayout(page)
++        vbox.setContentsMargins(28, 22, 28, 24)
++        vbox.setSpacing(14)
++
++        title = QLabel("Picture & Performance Settings")
++        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
++        vbox.addWidget(title)
++
++        desc = QLabel("Configure display mode, internal rendering resolution, shadow cascades, Intel XeSS Super Resolution, and Frame Generation.")
++        desc.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        vbox.addWidget(desc)
++
++        # Display Mode Cards
++        mode_sec = QLabel("Display Mode")
++        mode_sec.setStyleSheet("color: #0f172a; font-size: 14px; font-weight: 800; margin-top: 6px;")
++        vbox.addWidget(mode_sec)
++
++        self.mode_cards = []
++        modes = [
++            ("borderless", "Borderless Fullscreen", "Runs at desktop resolution for seamless Alt+Tab and crisp scaling.", "fa5s.window-maximize"),
++            ("fullscreen", "Exclusive Fullscreen", "Uses the current monitor mode; scene quality does not change its size.", "fa5s.expand"),
++            ("windowed", "Windowed", "Opens in a resizable window with native OS borders.", "fa5s.window-restore"),
++        ]
++
++        for mid, mtitle, mdesc, micon in modes:
++            card = ModeCard(mid, mtitle, mdesc, micon, is_selected=(mid == self.selected_window_mode), on_select=self.set_window_mode)
++            self.mode_cards.append(card)
++            vbox.addWidget(card)
++
++        # Resolution Grid
++        res_sec = QLabel("Target Scene Resolution")
++        res_sec.setStyleSheet("color: #0f172a; font-size: 14px; font-weight: 800; margin-top: 10px;")
++        vbox.addWidget(res_sec)
++
++        grid = QGridLayout()
++        grid.setSpacing(10)
++        res_options = [(rid, label, rid.replace("x", " x ")) for rid, label in RESOLUTIONS]
++
++        self.detailed_res_btns = {}
++        for i, (rid, rname, rdesc) in enumerate(res_options):
++            btn = QPushButton(f"{rname}\n{rdesc}")
++            btn.setFixedHeight(52)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            is_sel = (rid == self.selected_res_id)
++            self.style_detailed_res_btn(btn, is_sel)
++            btn.clicked.connect(lambda ch, r=rid: self.set_resolution(r))
++            self.detailed_res_btns[rid] = btn
++            grid.addWidget(btn, i // 3, i % 3)
++        vbox.addLayout(grid)
++
++        # Shadow Quality & Resolution Grid
++        shadow_sec = QLabel("Shadow Quality & Cascade Resolution")
++        shadow_sec.setStyleSheet("color: #0f172a; font-size: 14px; font-weight: 800; margin-top: 10px;")
++        vbox.addWidget(shadow_sec)
++
++        shadow_desc = QLabel("Controls shadow map cascade resolution. 1024x matches Switch Docked; 2048x+ renders crisp PC shadows.")
++        shadow_desc.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        vbox.addWidget(shadow_desc)
++
++        shadow_grid = QGridLayout()
++        shadow_grid.setSpacing(10)
++        self.detailed_shadow_btns = {}
++        for i, (sid, sname, sdesc) in enumerate(SHADOW_RESOLUTIONS):
++            btn = QPushButton(f"{sname}\n{sdesc}")
++            btn.setFixedHeight(50)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            is_sel = (sid == self.selected_shadow_res)
++            self.style_detailed_res_btn(btn, is_sel)
++            btn.clicked.connect(lambda ch, s=sid: self.set_shadow_resolution(s))
++            self.detailed_shadow_btns[sid] = btn
++            shadow_grid.addWidget(btn, i // 3, i % 3)
++        vbox.addLayout(shadow_grid)
++
++        # Intel XeSS Super Resolution (Upscaler)
++        xess_sr_sec = QLabel("Intel XeSS Super Resolution (Upscaler)")
++        xess_sr_sec.setStyleSheet("color: #0f172a; font-size: 14px; font-weight: 800; margin-top: 10px;")
++        vbox.addWidget(xess_sr_sec)
++
++        xess_sr_desc = QLabel("High-efficiency AI & spatial-temporal upscaling compatible with all Vulkan 1.3 GPUs (Intel, NVIDIA, AMD). Renders internally at a lower resolution and reconstructs sharp target output.")
++        xess_sr_desc.setWordWrap(True)
++        xess_sr_desc.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        vbox.addWidget(xess_sr_desc)
++
++        xess_sr_box = QFrame()
++        xess_sr_box.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px;")
++        xess_sr_layout = QHBoxLayout(xess_sr_box)
++        xess_sr_layout.setContentsMargins(16, 12, 16, 12)
++        xess_sr_layout.setSpacing(14)
++
++        self.xess_sr_switch = ToggleSwitch(checked=self.xess_sr_on, active_color="#0f766e")
++        self.xess_sr_switch.toggled.connect(self.set_xess_sr_enabled)
++        xess_sr_layout.addWidget(self.xess_sr_switch)
++
++        xess_sr_txt_layout = QVBoxLayout()
++        xess_sr_txt_layout.setSpacing(2)
++        xess_sr_title = QLabel("Enable Intel XeSS Super Resolution (XeSS-SR)")
++        xess_sr_title.setStyleSheet("color: #0f172a; font-size: 13px; font-weight: 700; border: none; background: transparent;")
++        xess_sr_subtitle = QLabel("Uses libxess.dll in xess/ when present or built-in Vulkan 1.3 upscaling on any GPU.")
++        xess_sr_subtitle.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500; border: none; background: transparent;")
++        xess_sr_txt_layout.addWidget(xess_sr_title)
++        xess_sr_txt_layout.addWidget(xess_sr_subtitle)
++        xess_sr_layout.addLayout(xess_sr_txt_layout)
++        xess_sr_layout.addStretch(1)
++        vbox.addWidget(xess_sr_box)
++
++        xess_sr_grid = QGridLayout()
++        xess_sr_grid.setSpacing(10)
++        self.detailed_xess_sr_btns = {}
++        for i, (mid, mname) in enumerate(XESS_SR_MODES):
++            btn = QPushButton(mname)
++            btn.setFixedHeight(44)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            is_sel = (mid == self.selected_xess_sr_mode)
++            self.style_detailed_res_btn(btn, is_sel)
++            btn.clicked.connect(lambda ch, m=mid: self.set_xess_sr_mode(m))
++            self.detailed_xess_sr_btns[mid] = btn
++            xess_sr_grid.addWidget(btn, i // 3, i % 3)
++        vbox.addLayout(xess_sr_grid)
++
++        # Intel XeSS Frame Generation (XeFG / XeLL)
++        xess_sec = QLabel("Intel XeSS Frame Generation (XeFG & XeLL Low Latency)")
++        xess_sec.setStyleSheet("color: #0f172a; font-size: 14px; font-weight: 800; margin-top: 10px;")
++        vbox.addWidget(xess_sec)
++
++        xess_desc = QLabel("Optical-flow motion-compensated frame interpolation with 2x, 3x, and 4x multipliers and sub-frame display pacing.")
++        xess_desc.setWordWrap(True)
++        xess_desc.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        vbox.addWidget(xess_desc)
++
++        xess_box = QFrame()
++        xess_box.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px;")
++        xess_layout = QHBoxLayout(xess_box)
++        xess_layout.setContentsMargins(16, 12, 16, 12)
++        xess_layout.setSpacing(14)
++
++        self.xess_fg_switch = ToggleSwitch(checked=self.xess_fg_on, active_color="#0f766e")
++        self.xess_fg_switch.toggled.connect(self.set_xess_fg_enabled)
++        xess_layout.addWidget(self.xess_fg_switch)
++
++        xess_txt_layout = QVBoxLayout()
++        xess_txt_layout.setSpacing(2)
++        xess_title = QLabel("Enable Intel XeSS Frame Generation (XeFG)")
++        xess_title.setStyleSheet("color: #0f172a; font-size: 13px; font-weight: 700; border: none; background: transparent;")
++        xess_subtitle = QLabel("Synthesizes motion-compensated intermediate frames (2x / 3x / 4x) with scene-cut protection.")
++        xess_subtitle.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500; border: none; background: transparent;")
++        xess_txt_layout.addWidget(xess_title)
++        xess_txt_layout.addWidget(xess_subtitle)
++        xess_layout.addLayout(xess_txt_layout)
++        xess_layout.addStretch(1)
++        vbox.addWidget(xess_box)
++
++        xess_grid = QGridLayout()
++        xess_grid.setSpacing(10)
++        self.detailed_xess_fg_btns = {}
++        active_mult_key = self.selected_xess_fg_mult if self.xess_fg_on else "off"
++        for i, item in enumerate(XESS_FG_MULTIPLIERS):
++            mid = item[0]
++            mname = item[1]
++            mdesc = item[2] if len(item) > 2 else ""
++            btn = QPushButton(f"{mname}\n{mdesc}".strip() if mdesc else mname)
++            btn.setFixedHeight(48)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            is_sel = (mid == active_mult_key)
++            self.style_detailed_res_btn(btn, is_sel)
++            btn.clicked.connect(lambda ch, m=mid: self.set_xess_fg_multiplier(m))
++            self.detailed_xess_fg_btns[mid] = btn
++            xess_grid.addWidget(btn, i // 2, i % 2)
++        vbox.addLayout(xess_grid)
++
++        # Downscale / Fit to screen option
++        ds_box = QFrame()
++        ds_box.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; margin-top: 8px;")
++        ds_layout = QHBoxLayout(ds_box)
++        ds_layout.setContentsMargins(16, 12, 16, 12)
++        ds_layout.setSpacing(14)
++
++        self.downscale_switch = ToggleSwitch(checked=self.fit_window, active_color="#0f766e")
++        self.downscale_switch.toggled.connect(lambda ch: self.save_settings())
++        ds_layout.addWidget(self.downscale_switch)
++
++        ds_txt_layout = QVBoxLayout()
++        ds_txt_layout.setSpacing(2)
++        ds_title = QLabel("Keep window within the desktop work area")
++        ds_title.setStyleSheet("color: #0f172a; font-size: 13px; font-weight: 700; border: none; background: transparent;")
++        ds_desc = QLabel("Windowed mode only. The game image always fits the display with its 16:9 aspect ratio preserved.")
++        ds_desc.setWordWrap(True)
++        ds_desc.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500; border: none; background: transparent;")
++        ds_txt_layout.addWidget(ds_title)
++        ds_txt_layout.addWidget(ds_desc)
++        ds_layout.addLayout(ds_txt_layout)
++        ds_layout.addStretch(1)
++        vbox.addWidget(ds_box)
++
++        size_row = QHBoxLayout()
++        win_size_lbl = QLabel("Window size:")
++        win_size_lbl.setStyleSheet("color: #0f172a; font-weight: 700; font-size: 12px;")
++        size_row.addWidget(win_size_lbl)
++        self.window_width_spin = QSpinBox()
++        self.window_width_spin.setRange(640, 7680)
++        self.window_width_spin.setValue(self.window_width)
++        self.window_height_spin = QSpinBox()
++        self.window_height_spin.setRange(360, 4320)
++        self.window_height_spin.setValue(self.window_height)
++        size_row.addWidget(self.window_width_spin)
++        sep_lbl = QLabel("x")
++        sep_lbl.setStyleSheet("color: #334155; font-weight: 700;")
++        size_row.addWidget(sep_lbl)
++        size_row.addWidget(self.window_height_spin)
++        size_row.addStretch()
++        for spin in (self.window_width_spin, self.window_height_spin):
++            spin.setStyleSheet(
++                "QSpinBox { background: #ffffff; color: #0f172a; border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px 10px; font-weight: 700; }"
++                "QSpinBox:disabled { background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; }"
++            )
++            spin.setEnabled(self.selected_window_mode == "windowed")
++            spin.valueChanged.connect(lambda _: self.save_settings())
++        vbox.addLayout(size_row)
++
++        self.resolution_note = QLabel("Higher scene quality uses more GPU VRAM. Other display aspect ratios use letterboxing to preserve the native 16:9 composition.")
++        self.resolution_note.setWordWrap(True)
++        self.resolution_note.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500;")
++        vbox.addWidget(self.resolution_note)
++        vbox.addStretch(1)
++
++        scroll = QScrollArea()
++        scroll.setWidgetResizable(True)
++        scroll.setFrameShape(QFrame.Shape.NoFrame)
++        scroll.setStyleSheet("background: #f1f5f9;")
++        scroll.setWidget(page)
++        return scroll
++
++    def style_detailed_res_btn(self, btn, is_selected):
++        if is_selected:
++            btn.setStyleSheet("""
++                QPushButton {
++                    background-color: #f0fdfa;
++                    border: 2px solid #0f766e;
++                    border-radius: 8px;
++                    color: #0f766e;
++                    font-weight: 800;
++                    font-size: 12px;
++                    text-align: center;
++                    padding: 6px;
++                }
++            """)
++        else:
++            btn.setStyleSheet("""
++                QPushButton {
++                    background-color: #ffffff;
++                    border: 1px solid #cbd5e1;
++                    border-radius: 8px;
++                    color: #0f172a;
++                    font-weight: 700;
++                    font-size: 12px;
++                    text-align: center;
++                    padding: 6px;
++                }
++                QPushButton:hover {
++                    background-color: #f8fafc;
++                    border-color: #0f766e;
++                    color: #0f766e;
++                }
++            """)
++
++    def create_controls_page(self):
++        self.controls_page = ControlsPage(self.input_settings, self.save_settings, is_controller_connected())
++        return self.controls_page
++
++    def _light_action_button_style(self):
++        return """
++            QPushButton {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                color: #0f172a;
++                font-weight: 700;
++                font-size: 13px;
++                padding-left: 16px;
++                text-align: left;
++            }
++            QPushButton:hover {
++                background-color: #f0fdfa;
++                border-color: #0f766e;
++                color: #0f766e;
++            }
++        """
++
++    def create_game_files_page(self):
++        page = QWidget()
++        vbox = QVBoxLayout(page)
++        vbox.setContentsMargins(28, 22, 28, 22)
++        vbox.setSpacing(14)
++
++        title = QLabel("Game Files & Shader Cache")
++        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
++        vbox.addWidget(title)
++
++        desc = QLabel(f"Installation Root: {BASE_DIR}")
++        desc.setStyleSheet("color: #334155; font-size: 12px; font-family: 'Consolas', monospace; font-weight: 600;")
++        vbox.addWidget(desc)
++
++        card = QFrame()
++        card.setObjectName("CardFrame")
++        cv = QVBoxLayout(card)
++        cv.setSpacing(10)
++
++        buttons = [
++            ("Pre-compile / Verify Shaders", "fa5s.bolt", "#0f766e", self.open_shader_precompile),
++            ("Open Vulkan Shader Cache Folder", "fa5s.archive", "#1d4ed8", lambda: os.startfile(str(BASE_DIR / "userdata" / "cache" / "vulkan-shaders")) if (BASE_DIR / "userdata" / "cache" / "vulkan-shaders").is_dir() else None),
++            ("Open Game Root Directory", "fa5s.folder-open", "#0f766e", lambda: os.startfile(str(BASE_DIR))),
++            ("Open RomFS Data Folder", "fa5s.database", "#0f766e", lambda: os.startfile(str(ROMFS_DIR)) if ROMFS_DIR.is_dir() else None),
++            ("Open ExeFS Binaries Folder", "fa5s.cogs", "#0f766e", lambda: os.startfile(str(EXEFS_DIR)) if EXEFS_DIR.is_dir() else None),
++            ("Open Configuration File (ultratears.cfg)", "fa5s.file-alt", "#1d4ed8", lambda: os.startfile(str(CFG_PATH)) if CFG_PATH.is_file() else None),
++        ]
++
++        for btitle, bicon, bcolor, baction in buttons:
++            btn = QPushButton(btitle)
++            btn.setIcon(qta.icon(bicon, color=bcolor))
++            btn.setFixedHeight(42)
++            btn.setCursor(Qt.CursorShape.PointingHandCursor)
++            btn.setStyleSheet(self._light_action_button_style())
++            btn.clicked.connect(baction)
++            cv.addWidget(btn)
++
++        vbox.addWidget(card)
++        vbox.addStretch(1)
++        return page
++
++    def create_mods_page(self):
++        page = QWidget()
++        vbox = QVBoxLayout(page)
++        vbox.setContentsMargins(28, 22, 28, 22)
++        vbox.setSpacing(14)
++
++        title = QLabel("Mods & Custom RomFS Patches")
++        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
++        vbox.addWidget(title)
++
++        desc = QLabel(f"RomFS mods path: {ROMFS_DIR}")
++        desc.setStyleSheet("color: #334155; font-size: 12px; font-family: 'Consolas', monospace; font-weight: 600;")
++        vbox.addWidget(desc)
++
++        card = QFrame()
++        card.setObjectName("CardFrame")
++        cv = QVBoxLayout(card)
++        cv.setSpacing(12)
++
++        open_romfs_btn = QPushButton("Open RomFS Folder")
++        open_romfs_btn.setIcon(qta.icon("fa5s.folder-open", color="#0f766e"))
++        open_romfs_btn.setFixedHeight(42)
++        open_romfs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        open_romfs_btn.setStyleSheet(self._light_action_button_style())
++        open_romfs_btn.clicked.connect(lambda: os.startfile(str(ROMFS_DIR)) if ROMFS_DIR.is_dir() else None)
++        cv.addWidget(open_romfs_btn)
++
++        info_lbl = QLabel("To install mods: copy mod files directly into their matching folders inside data/romfs.")
++        info_lbl.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
++        cv.addWidget(info_lbl)
++
++        vbox.addWidget(card)
++        vbox.addStretch(1)
++        return page
++
++    def create_saves_page(self):
++        page = QWidget()
++        vbox = QVBoxLayout(page)
++        vbox.setContentsMargins(28, 22, 28, 22)
++        vbox.setSpacing(14)
++
++        title = QLabel("Save Data & User Profiles")
++        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
++        vbox.addWidget(title)
++
++        desc = QLabel(f"Save game directory: {SAVES_DIR}")
++        desc.setStyleSheet("color: #334155; font-size: 12px; font-family: 'Consolas', monospace; font-weight: 600;")
++        vbox.addWidget(desc)
++
++        card = QFrame()
++        card.setObjectName("CardFrame")
++        cv = QVBoxLayout(card)
++        cv.setSpacing(12)
++
++        open_save_btn = QPushButton("Open Save Directory (userdata)")
++        open_save_btn.setIcon(qta.icon("fa5s.folder-open", color="#0f766e"))
++        open_save_btn.setFixedHeight(42)
++        open_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        open_save_btn.setStyleSheet(self._light_action_button_style())
++        open_save_btn.clicked.connect(self.open_saves_folder)
++        cv.addWidget(open_save_btn)
++
++        vbox.addWidget(card)
++        vbox.addStretch(1)
++        return page
++
++    def open_saves_folder(self):
++        SAVES_DIR.mkdir(parents=True, exist_ok=True)
++        os.startfile(str(SAVES_DIR))
++
++    def create_footer(self):
++        footer = QFrame()
++        footer.setObjectName("FooterBar")
++        footer.setFixedHeight(66)
++
++        layout = QHBoxLayout(footer)
++        layout.setContentsMargins(24, 0, 24, 0)
++        layout.setSpacing(14)
++        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
++
++        self.status_lbl = QLabel()
++        self.update_status_bar()
++        layout.addWidget(self.status_lbl)
++
++        layout.addStretch(1)
++
++        log_btn = QPushButton("View Log")
++        log_btn.setIcon(qta.icon("fa5s.terminal", color="#0f172a"))
++        log_btn.setFixedHeight(40)
++        log_btn.setFixedWidth(105)
++        log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        log_btn.setStyleSheet("""
++            QPushButton {
++                background-color: #ffffff;
++                border: 1px solid #cbd5e1;
++                border-radius: 8px;
++                color: #0f172a;
++                font-weight: 700;
++                font-size: 12px;
++            }
++            QPushButton:hover {
++                background-color: #f1f5f9;
++                border-color: #0f766e;
++                color: #0f766e;
++            }
++        """)
++        log_btn.clicked.connect(self.show_log_dialog)
++        layout.addWidget(log_btn)
++
++        self.play_btn = QPushButton("LAUNCH GAME")
++        self.play_btn.setIcon(qta.icon("fa5s.play", color="#ffffff"))
++        self.play_btn.setIconSize(QSize(13, 13))
++        self.play_btn.setFixedHeight(40)
++        self.play_btn.setFixedWidth(175)
++        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
++        self.play_btn.setStyleSheet("""
++            QPushButton {
++                background-color: #0f766e;
++                border: 1px solid #0d9488;
++                border-radius: 8px;
++                color: #ffffff;
++                font-weight: 800;
++                font-size: 13px;
++                letter-spacing: 0.8px;
++            }
++            QPushButton:hover {
++                background-color: #0d9488;
++            }
++            QPushButton:pressed {
++                background-color: #115e59;
++            }
++        """)
++        self.play_btn.clicked.connect(self.launch_game)
++        layout.addWidget(self.play_btn)
++
++        return footer
++
++    def update_status_bar(self):
++        mode_text = "Borderless" if self.selected_window_mode == "borderless" else ("Exclusive Fullscreen" if self.selected_window_mode == "fullscreen" else "Windowed")
++        fps_text = f"Smooth (up to {self.fps_limit} FPS)" if self.fps_goal == "smooth" else ("Balanced (30 FPS)" if self.fps_goal == "balanced" else "Quiet (30 FPS)")
++        xess_sr_text = ""
++        if getattr(self, "xess_sr_on", False):
++            render_res = xess_sr_render_resolution(self.selected_res_id, True, self.selected_xess_sr_mode)
++            render_name = dict(RESOLUTIONS).get(render_res, render_res)
++            mode_label = self.selected_xess_sr_mode.replace("_", " ").title()
++            if self.selected_xess_sr_mode == "aa":
++                mode_label = "Native AA"
++            xess_sr_text = f"  |  XeSS ({mode_label}) [Render {render_name}]"
++        xess_fg_text = f"  |  XeSS-FG ({getattr(self, 'selected_xess_fg_mult', '2')}x)" if getattr(self, "xess_fg_on", False) else ""
++        self.status_lbl.setText(f"{fps_text}  |  {mode_text}  |  {self.selected_res_id}{xess_sr_text}{xess_fg_text}  |  Shadow {self.selected_shadow_res}x  |  Vulkan 1.3 Ready")
++        self.status_lbl.setStyleSheet("color: #1e293b; font-size: 12px; font-weight: 700;")
++
++    def runtime_settings(self):
++        smooth = self.fps_goal == "smooth"
++        fit = self.downscale_switch.isChecked() if hasattr(self, "downscale_switch") else self.fit_window
++        ww = self.window_width_spin.value() if hasattr(self, "window_width_spin") else self.window_width
++        wh = self.window_height_spin.value() if hasattr(self, "window_height_spin") else self.window_height
++        xess_sr_on = getattr(self, "xess_sr_on", False)
++        xess_sr_mode_val = getattr(self, "selected_xess_sr_mode", "quality")
++        xess_fg_on = getattr(self, "xess_fg_on", False)
++        xess_fg_mult = str(getattr(self, "selected_xess_fg_mult", "2"))
++        return {
++            **display_values(self.selected_res_id, self.selected_window_mode, fit, ww, wh,
++                             xess_sr_on=xess_sr_on, xess_sr_mode_name=xess_sr_mode_val),
++            "TOTK_SHADOW_RES": str(self.selected_shadow_res),
++            "TOTK_XESS_SR": "1" if xess_sr_on else "0",
++            "TOTK_XESS_SR_MODE": xess_sr_mode_val,
++            "TOTK_XESS_FG": "1" if xess_fg_on else "0",
++            "TOTK_XESS_FG_MULTIPLIER": xess_fg_mult,
++            "TOTK_UNCAPPED": "1" if smooth else "0",
++            "TOTK_UNCAPPED_HZ": str(self.fps_limit) if smooth else "30",
++            "TOTK_FPS60": "1" if smooth else "0",
++            "TOTK_MAX_INTERVAL": "1" if smooth else "2",
++            "TOTK_UNCAPPED_INTERVAL": "1" if smooth else "0",
++            "TOTK_DYNAMIC_FPS": "1", "TOTK_REALTIME": "1",
++            "TOTK_OPERATION_MODE": "handheld" if self.fps_goal == "quiet" else "docked",
++            **self.input_settings.runtime_values(),
++        }
++
++    def save_settings(self):
++        values = {**self.runtime_settings(), "launcher_fps_limit": str(self.fps_limit)}
++        try:
++            write_config_values(values)
++        except OSError as error:
++            QMessageBox.warning(self, "Settings not saved", str(error))
++            return False
++        self.cfg.update(values)
++        return True
++
++    def update_fps_labels(self):
++        self.fps_limit_seg.setVisible(self.fps_goal == "smooth")
++        target = self.fps_limit if self.fps_goal == "smooth" else 30
++        if self.fps_goal == "smooth":
++            self.goal_desc_lbl.setText("Higher frame rates with real-time game and animation clocks.")
++        elif self.fps_goal == "balanced":
++            self.goal_desc_lbl.setText("30 FPS with the docked profile and real-time game speed.")
++        else:
++            self.goal_desc_lbl.setText("30 FPS with the handheld profile for a lighter workload.")
++        self.goal_exp_lbl.setText(f"Target: up to {target} FPS at {self.selected_res_id}")
++        self.update_status_bar()
++
++    def on_fps_goal_changed(self, goal):
++        self.fps_goal = goal
++        self.save_settings()
++        self.update_fps_labels()
++
++    def on_fps_limit_changed(self, limit):
++        self.fps_limit = int(limit)
++        self.save_settings()
++        self.update_fps_labels()
++
++    def on_fullscreen_switch_toggled(self, is_checked):
++        new_mode = "borderless" if is_checked else "windowed"
++        self.set_window_mode(new_mode)
++
++    def set_window_mode(self, mode_id):
++        self.selected_window_mode = mode_id
++        for name in ("window_width_spin", "window_height_spin"):
++            if hasattr(self, name): getattr(self, name).setEnabled(mode_id == "windowed")
++        self.save_settings()
++
++        for card in self.mode_cards:
++            card.set_selected(card.mode_id == mode_id)
++
++        if hasattr(self, "fs_switch"):
++            self.fs_switch.setChecked(mode_id != "windowed")
++
++        if hasattr(self, "rc_display_item"):
++            mode_text = "Borderless Fullscreen" if mode_id == "borderless" else ("Exclusive Fullscreen" if mode_id == "fullscreen" else "Windowed")
++            self.rc_display_item.set_text(f"Display: {mode_text} at {self.selected_res_id}")
++
++        self.update_status_bar()
++
++    def set_resolution(self, res_id):
++        if res_id not in dict(RESOLUTIONS):
++            return
++        self.selected_res_id = res_id
++        self.save_settings()
++
++        for chip in self.res_chips:
++            chip.set_selected(chip.res_id == res_id)
++
++        if hasattr(self, "detailed_res_btns"):
++            for rid, btn in self.detailed_res_btns.items():
++                self.style_detailed_res_btn(btn, rid == res_id)
++
++        if hasattr(self, "rc_display_item"):
++            mode_text = "Borderless Fullscreen" if self.selected_window_mode == "borderless" else ("Exclusive Fullscreen" if self.selected_window_mode == "fullscreen" else "Windowed")
++            self.rc_display_item.set_text(f"Display: {mode_text} at {self.selected_res_id}")
++
++        if hasattr(self, "goal_exp_lbl"):
++            self.update_fps_labels()
++
++        self.update_status_bar()
++
++    def set_shadow_resolution(self, res_id):
++        valid = dict((r[0], r[1]) for r in SHADOW_RESOLUTIONS)
++        if res_id not in valid:
++            return
++        self.selected_shadow_res = res_id
++        self.save_settings()
++
++        for chip in self.shadow_chips:
++            chip.set_selected(chip.res_id == res_id)
++
++        if hasattr(self, "detailed_shadow_btns"):
++            for sid, btn in self.detailed_shadow_btns.items():
++                self.style_detailed_res_btn(btn, sid == res_id)
++
++        self.update_status_bar()
++
++    def set_xess_sr_enabled(self, enabled):
++        self.xess_sr_on = bool(enabled)
++        if hasattr(self, "xess_sr_switch") and self.xess_sr_switch.isChecked() != self.xess_sr_on:
++            self.xess_sr_switch.setChecked(self.xess_sr_on)
++        self.save_settings()
++        self.update_status_bar()
++
++    def set_xess_sr_mode(self, mode_id):
++        valid = dict(XESS_SR_MODES)
++        if mode_id not in valid:
++            return
++        self.selected_xess_sr_mode = mode_id
++        self.save_settings()
++        if hasattr(self, "detailed_xess_sr_btns"):
++            for mid, btn in self.detailed_xess_sr_btns.items():
++                self.style_detailed_res_btn(btn, mid == mode_id)
++        self.update_status_bar()
++
++    def _sync_xess_fg_buttons(self):
++        active_key = self.selected_xess_fg_mult if self.xess_fg_on else "off"
++        if hasattr(self, "detailed_xess_fg_btns"):
++            for mid, btn in self.detailed_xess_fg_btns.items():
++                self.style_detailed_res_btn(btn, mid == active_key)
++
++    def set_xess_fg_enabled(self, enabled):
++        self.xess_fg_on = bool(enabled)
++        if self.xess_fg_on and self.selected_xess_fg_mult not in ("2", "3", "4"):
++            self.selected_xess_fg_mult = "2"
++        if hasattr(self, "xess_fg_switch") and self.xess_fg_switch.isChecked() != self.xess_fg_on:
++            self.xess_fg_switch.setChecked(self.xess_fg_on)
++        self._sync_xess_fg_buttons()
++        self.save_settings()
++        self.update_status_bar()
++
++    def set_xess_fg_multiplier(self, mult_id):
++        mult_str = str(mult_id).strip().lower()
++        if mult_str in ("off", "0", "1"):
++            self.xess_fg_on = False
++            if hasattr(self, "xess_fg_switch") and self.xess_fg_switch.isChecked():
++                self.xess_fg_switch.setChecked(False)
++        elif mult_str in ("2", "3", "4"):
++            self.selected_xess_fg_mult = mult_str
++            self.xess_fg_on = True
++            if hasattr(self, "xess_fg_switch") and not self.xess_fg_switch.isChecked():
++                self.xess_fg_switch.setChecked(True)
++        else:
++            return
++        self._sync_xess_fg_buttons()
++        self.save_settings()
++        self.update_status_bar()
++
++    def show_log_dialog(self):
++        dlg = LogDialog(self)
++        dlg.exec()
++
++    def open_shader_precompile(self):
++        env = os.environ.copy()
++        env.pop("DM_PRESENT_HZ", None)
++        env.pop("DM_PRESENT_INTERVAL", None)
++        env.pop("TOTK_NO_OVERRIDE_NVN", None)
++        env.pop("TOTK_NO_OVERRIDE_VP", None)
++        env.update(self.runtime_settings())
++        dlg = ShaderPrepareDialog(self, env)
++        dlg.exec()
++
++    def launch_game(self):
++        if not EXE_PATH.is_file():
++            print(f"Executable not found at {EXE_PATH}")
++            return
++
++        if not self.save_settings():
++            return
++        env = os.environ.copy()
++        env.pop("DM_PRESENT_HZ", None)
++        env.pop("DM_PRESENT_INTERVAL", None)
++        env.pop("TOTK_NO_OVERRIDE_NVN", None)
++        env.pop("TOTK_NO_OVERRIDE_VP", None)
++        env.update(self.runtime_settings())
++
++        try:
++            with open(LOG_PATH, "w", encoding="utf-8") as log_f:
++                subprocess.Popen([str(EXE_PATH)], cwd=str(BASE_DIR), env=env, stdout=log_f, stderr=subprocess.STDOUT)
++            self.close()
++        except Exception as e:
++            print(f"Failed to launch game: {e}")
++
++
++def main():
++    app = QApplication(sys.argv)
++    window = PrelauncherWindow()
++    window.show()
++    sys.exit(app.exec())
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/host/keyboard_bindings.def b/src/host/keyboard_bindings.def
+new file mode 100644
+index 0000000..110b3e5
+--- /dev/null
++++ b/src/host/keyboard_bindings.def
+@@ -0,0 +1,29 @@
++/* Shared by the native input layer and input_config.py. SDL physical scancodes;
++ * 512/513/514 = left/right/middle mouse; 0 = unbound. Last column is the existing
++ * Mac-virtual-key input ABI. Left-hand defaults: Shift runs, Space jumps.
++ * Actions describe the game's default controls; in-game swaps/context still apply.
++ */
++INPUT_BINDING(MOVE_UP, "Movement", "Left stick up", "Move forward / navigate up", 26, 0, 13)
++INPUT_BINDING(MOVE_DOWN, "Movement", "Left stick down", "Move backward / navigate down", 22, 0, 1)
++INPUT_BINDING(MOVE_LEFT, "Movement", "Left stick left", "Move left / navigate left", 4, 0, 0)
++INPUT_BINDING(MOVE_RIGHT, "Movement", "Left stick right", "Move right / navigate right", 7, 0, 2)
++INPUT_BINDING(LOOK_UP, "Camera", "Right stick up", "Look up / move scope or selection up", 82, 0, 126)
++INPUT_BINDING(LOOK_DOWN, "Camera", "Right stick down", "Look down / move scope or selection down", 81, 0, 125)
++INPUT_BINDING(LOOK_LEFT, "Camera", "Right stick left", "Look left / move scope or selection left", 80, 0, 123)
++INPUT_BINDING(LOOK_RIGHT, "Camera", "Right stick right", "Look right / move scope or selection right", 79, 0, 124)
++INPUT_BINDING(A, "Actions", "A", "Interact, pick up, talk / confirm", 8, 0, 38)
++INPUT_BINDING(B, "Actions", "B", "Sprint (hold), put away / cancel", 225, 41, 40)
++INPUT_BINDING(X, "Actions", "X", "Jump / paraglider while airborne", 44, 0, 34)
++INPUT_BINDING(Y, "Actions", "Y", "Melee attack / charged attack (hold)", 512, 9, 32)
++INPUT_BINDING(L, "Actions", "L", "Use selected ability / ability wheel (hold)", 6, 0, 12)
++INPUT_BINDING(R, "Actions", "R", "Aim a thrown weapon / throw on release", 23, 0, 14)
++INPUT_BINDING(ZL, "Actions", "ZL", "Focus or lock on / raise shield (hold)", 514, 20, 58)
++INPUT_BINDING(ZR, "Actions", "ZR", "Draw bow (hold) / fire on release", 513, 21, 56)
++INPUT_BINDING(PLUS, "Menus", "+", "Open pouch / inventory and pause menus", 43, 0, 36)
++INPUT_BINDING(MINUS, "Menus", "-", "Open Purah Pad / map and adventure log", 53, 16, 48)
++INPUT_BINDING(STICK_L, "Actions", "Left stick press", "Crouch / stand up", 224, 0, 6)
++INPUT_BINDING(STICK_R, "Actions", "Right stick press", "Open / close the scope (tap)", 226, 0, 8)
++INPUT_BINDING(DPAD_UP, "Quick menus", "D-pad up", "Materials quick menu (hold)", 25, 0, 17)
++INPUT_BINDING(DPAD_DOWN, "Quick menus", "D-pad down", "Whistle for your horse", 10, 0, 5)
++INPUT_BINDING(DPAD_LEFT, "Quick menus", "D-pad left", "Shield quick menu (hold)", 29, 0, 3)
++INPUT_BINDING(DPAD_RIGHT, "Quick menus", "D-pad right", "Weapon / bow quick menu (hold)", 27, 0, 4)
+diff --git a/tools/test_controls.py b/tools/test_controls.py
+new file mode 100644
+index 0000000..23e3cda
+--- /dev/null
++++ b/tools/test_controls.py
+@@ -0,0 +1,222 @@
++"""Real Qt key capture, input-profile persistence and process-environment tests."""
++import os
++import pathlib
++import sys
++import unittest
++import uuid
++from unittest.mock import patch
++
++os.environ['QT_QPA_PLATFORM'] = 'offscreen'
++ROOT = pathlib.Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++import prelauncher as launcher
++from controls_widgets import event_scancode
++from input_config import ACTIONS, InputSettings
++from PyQt6.QtCore import Qt, QEvent
++from PyQt6.QtGui import QKeyEvent
++from PyQt6.QtTest import QTest
++from PyQt6.QtWidgets import QApplication, QMessageBox
++
++
++class ControlsTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls): cls.app = QApplication.instance() or QApplication([])
++
++    def setUp(self):
++        self.work = ROOT / 'build' / ('controls-test-' + uuid.uuid4().hex)
++        self.work.mkdir(mode=0o777)
++        self.config = self.work / 'ultratears.cfg'
++        self.config.write_text('# Preserve\nromfs=data/romfs\nTOTK_UNCAPPED=1\nTOTK_UNCAPPED_HZ=120\n')
++        self.exe = self.work / 'fixture.exe'
++        self.exe.touch()
++        self.patchers = [patch.object(launcher, 'CFG_PATH', self.config),
++                         patch.object(launcher, 'LOG_PATH', self.work / 'test.log'),
++                         patch.object(launcher, 'EXE_PATH', self.exe),
++                         patch.object(launcher, 'is_controller_connected', return_value=False)]
++        for item in self.patchers: item.start()
++        self.windows = []
++        self.window = self.open_window()
++        self.page = self.window.controls_page
++        self.window.pages_stack.setCurrentIndex(2)
++        self.window.show()
++        self.app.processEvents()
++
++    def open_window(self):
++        window = launcher.PrelauncherWindow()
++        self.windows.append(window)
++        return window
++
++    def tearDown(self):
++        for window in self.windows: window.close()
++        for item in reversed(self.patchers): item.stop()
++        for file in self.work.iterdir(): file.unlink()
++        self.work.rmdir()
++
++    def capture(self, action, slot, key):
++        button = self.page.buttons[action][slot]
++        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
++        self.assertTrue(button.waiting)
++        QTest.keyClick(button, key)
++        return button
++
++    def test_key_capture_saves_and_restores_actual_scancodes(self):
++        self.capture('A', 0, Qt.Key.Key_O)
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_KEY_A'], '18,0')
++        restored = self.open_window()
++        self.assertEqual(restored.controls_page.buttons['A'][0].text(), 'O')
++        self.assertEqual(restored.runtime_settings()['TOTK_KEY_A'], '18,0')
++        self.assertEqual(restored.runtime_settings()['TOTK_UNCAPPED_HZ'], '120')
++
++    def test_conflict_can_be_cancelled_or_moved_without_duplicate_bindings(self):
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.No):
++            self.capture('A', 0, Qt.Key.Key_Space)
++        self.assertEqual(self.window.input_settings.bindings['A'][0], 8)
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++            self.capture('A', 0, Qt.Key.Key_Space)
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_KEY_A'], '44,0')
++        self.assertEqual(saved['TOTK_KEY_X'], '0,0')
++        self.assertEqual(self.page.buttons['X'][0].text(), 'Unbound')
++
++    def test_alternative_key_and_right_click_clear(self):
++        self.capture('A', 1, Qt.Key.Key_I)
++        QTest.mouseClick(self.page.buttons['A'][0], Qt.MouseButton.RightButton)
++        self.assertEqual(launcher.read_config()['TOTK_KEY_A'], '0,12')
++        self.assertEqual(self.page.buttons['A'][0].text(), 'Unbound')
++
++    def test_tab_is_captured_and_fullscreen_capture_shortcuts_are_reserved(self):
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++            self.capture('A', 0, Qt.Key.Key_Tab)
++        self.assertEqual(launcher.read_config()['TOTK_KEY_A'], '43,0')
++        for key in (Qt.Key.Key_F8, Qt.Key.Key_F11):
++            self.capture('A', 0, key)
++            self.assertIn('reserved', self.page.status.text())
++            self.assertEqual(launcher.read_config()['TOTK_KEY_A'], '43,0')
++
++    def test_windows_physical_keys_work_with_non_latin_and_extended_keys(self):
++        def event(key, scan, vk):
++            return QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, scan, vk, 0)
++        self.assertEqual(event_scancode(event(0x634, 0x1e, 0x41)), 4)  # Arabic layout, physical A
++        self.assertEqual(event_scancode(event(Qt.Key.Key_Z, 0x15, 0x5a)), 28)  # physical Y
++        self.assertEqual(event_scancode(event(Qt.Key.Key_AltGr, 0x138, 0x12)), 230)
++        self.assertEqual(event_scancode(event(Qt.Key.Key_End, 0x4f, 0x23)), 89)  # numpad 1
++
++    def test_modifiers_and_escape_can_be_assigned_as_single_keys(self):
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++            self.capture('A', 0, Qt.Key.Key_Control)
++        self.assertEqual(launcher.read_config()['TOTK_KEY_A'], '224,0')
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++            self.capture('A', 0, Qt.Key.Key_Escape)
++        self.assertEqual(launcher.read_config()['TOTK_KEY_A'], '41,0')
++        self.assertEqual(launcher.read_config()['TOTK_KEY_B'], '225,0')
++
++    def test_mouse_buttons_can_be_captured_moved_and_restored(self):
++        for mouse_button, code in ((Qt.MouseButton.LeftButton, 512),
++                                   (Qt.MouseButton.RightButton, 513),
++                                   (Qt.MouseButton.MiddleButton, 514)):
++            button = self.page.buttons['A'][0]
++            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
++            self.assertTrue(button.waiting)
++            with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++                QTest.mouseClick(button, mouse_button)
++            self.assertFalse(button.waiting)
++            self.assertEqual(launcher.read_config()['TOTK_KEY_A'], f'{code},0')
++            self.assertEqual(self.open_window().input_settings.bindings['A'][0], code)
++
++    def test_camera_mode_sensitivity_and_inversion_round_trip(self):
++        self.page.camera_mode.setCurrentIndex(self.page.camera_mode.findData('mouse'))
++        self.page.sensitivity.setValue(1.7)
++        self.page.invert_y.setChecked(True)
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_CAMERA_MODE'], 'mouse')
++        self.assertEqual(saved['TOTK_MOUSE_SENSITIVITY'], '1.70')
++        self.assertEqual(saved['TOTK_MOUSE_INVERT_Y'], '1')
++        self.assertFalse(self.page.buttons['LOOK_UP'][0].isEnabled())
++        self.assertTrue(self.page.buttons['A'][0].isEnabled())
++        restored = self.open_window()
++        self.assertEqual(restored.input_settings.camera_mode, 'mouse')
++        self.assertEqual(restored.controls_page.sensitivity.value(), 1.7)
++        restored.controls_page.camera_mode.setCurrentIndex(0)
++        self.assertTrue(restored.controls_page.buttons['LOOK_UP'][0].isEnabled())
++        self.assertEqual(restored.input_settings.bindings['LOOK_UP'][0], 82)
++
++    def test_restore_defaults_only_resets_input_preferences(self):
++        self.capture('A', 0, Qt.Key.Key_O)
++        self.page.camera_mode.setCurrentIndex(1)
++        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
++            self.page.restore_defaults()
++        self.assertEqual(self.window.input_settings.runtime_values(), InputSettings().runtime_values())
++        self.assertEqual(launcher.read_config()['TOTK_UNCAPPED_HZ'], '120')
++        self.assertEqual(launcher.read_config()['romfs'], 'data/romfs')
++
++    def test_failed_save_restores_input_and_visible_binding(self):
++        before = self.config.read_bytes()
++        with patch.object(launcher, 'write_config_values', side_effect=PermissionError('read only')), \
++             patch.object(QMessageBox, 'warning'):
++            self.capture('A', 0, Qt.Key.Key_O)
++        self.assertEqual(self.window.input_settings.bindings['A'][0], 8)
++        self.assertEqual(self.page.buttons['A'][0].text(), 'E')
++        self.assertIn('Not saved', self.page.status.text())
++        self.assertEqual(self.config.read_bytes(), before)
++
++    def test_launch_environment_contains_saved_mapping_and_camera_values(self):
++        self.capture('A', 0, Qt.Key.Key_O)
++        self.page.camera_mode.setCurrentIndex(1)
++        with patch.dict(os.environ, {'TOTK_KEY_A': '8,0', 'TOTK_CAMERA_MODE': 'keys'}), \
++             patch.object(launcher.subprocess, 'Popen') as start:
++            self.window.launch_game()
++        child = start.call_args.kwargs['env']
++        saved = launcher.read_config()
++        for key, value in self.window.input_settings.runtime_values().items():
++            self.assertEqual(child[key], value)
++            self.assertEqual(saved[key], value)
++        self.assertEqual(child['TOTK_KEY_A'], '18,0')
++        self.assertEqual(child['TOTK_CAMERA_MODE'], 'mouse')
++        self.assertEqual(len(self.page.buttons), len(ACTIONS))
++
++    def test_direct_mouse_camera_v2_settings_and_legacy_migration_backup(self):
++        # Legacy v1 config with TOTK_MOUSE_SENSITIVITY=2.50 must not alter look_deg_per_count default (0.04)
++        self.config.write_text(
++            '# Legacy v1\nromfs=data/romfs\nTOTK_CAMERA_MODE=mouse\n'
++            'TOTK_MOUSE_SENSITIVITY=2.50\nTOTK_MOUSE_INVERT_Y=1\nTOTK_KEY_A=18,0\n'
++        )
++        v1_bytes = self.config.read_bytes()
++        w = self.open_window()
++        self.assertEqual(w.input_settings.camera_mode, 'mouse')
++        self.assertEqual(w.input_settings.mouse_backend, 'native')
++        self.assertAlmostEqual(w.input_settings.look_deg_per_count, 0.04, places=5)
++        self.assertAlmostEqual(w.input_settings.aim_multiplier, 1.0, places=5)
++        self.assertAlmostEqual(w.input_settings.scope_multiplier, 1.0, places=5)
++        self.assertEqual(w.input_settings.smooth_ms, 0)
++        self.assertAlmostEqual(w.input_settings.sensitivity, 2.50, places=5)
++        self.assertTrue(w.input_settings.invert_y)
++
++        # Modify v2 settings via Qt controls and verify migration backup .v1.bak is created
++        p = w.controls_page
++        p.look_deg_per_count.setValue(0.065)
++        p.aim_multiplier.setValue(0.85)
++        p.scope_multiplier.setValue(0.75)
++        p.smooth_ms.setCurrentIndex(p.smooth_ms.findData(5))
++
++        backup = self.config.with_name('ultratears.cfg.v1.bak')
++        self.assertTrue(backup.is_file())
++        self.assertEqual(backup.read_bytes(), v1_bytes)
++
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_MOUSE_CAMERA_VERSION'], '2')
++        self.assertEqual(saved['TOTK_MOUSE_BACKEND'], 'native')
++        self.assertEqual(saved['TOTK_MOUSE_LOOK_DEG_PER_COUNT'], '0.065')
++        self.assertEqual(saved['TOTK_MOUSE_AIM_MULTIPLIER'], '0.85')
++        self.assertEqual(saved['TOTK_MOUSE_SCOPE_MULTIPLIER'], '0.75')
++        self.assertEqual(saved['TOTK_MOUSE_SMOOTH_MS'], '5')
++        self.assertEqual(saved['TOTK_MOUSE_SENSITIVITY'], '2.50')
++        self.assertEqual(saved['TOTK_KEY_A'], '18,0')
++
++        # Switching to legacy_stick backend disables direct spinboxes and saves backend
++        p.mouse_backend.setCurrentIndex(p.mouse_backend.findData('legacy_stick'))
++        self.assertEqual(launcher.read_config()['TOTK_MOUSE_BACKEND'], 'legacy_stick')
++        self.assertFalse(p.look_deg_per_count.isEnabled())
++
++
++if __name__ == '__main__': unittest.main(verbosity=2)
+diff --git a/tools/test_prelauncher.py b/tools/test_prelauncher.py
+new file mode 100644
+index 0000000..e483258
+--- /dev/null
++++ b/tools/test_prelauncher.py
+@@ -0,0 +1,260 @@
++"""Test real Qt controls, config round trips and launch arguments without launching TOTK.
++
++Run with the launcher's Python: python tools/test_prelauncher.py.
++"""
++import os
++import pathlib
++import sys
++import unittest
++import uuid
++from unittest.mock import patch
++
++os.environ['QT_QPA_PLATFORM'] = 'offscreen'
++ROOT = pathlib.Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++import prelauncher as launcher
++from PyQt6.QtWidgets import QApplication
++
++
++class PrelauncherTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.app = QApplication.instance() or QApplication([])
++
++    def setUp(self):
++        self.work = ROOT / 'build' / ('launcher-test-' + uuid.uuid4().hex)
++        self.work.mkdir(parents=True, exist_ok=True)
++        self.config = self.work / 'ultratears.cfg'
++        self.config.write_text('# Keep this comment\nromfs=data/romfs\ntextures=custom/textures\n'
++                               'TOTK_UNCAPPED=1\nTOTK_UNCAPPED_HZ=120\n'
++                               'TOTK_OPERATION_MODE=docked\nTOTK_WIDTH=1920\nTOTK_HEIGHT=1080\n')
++        self.exe = self.work / 'fixture.exe'
++        self.exe.touch()
++        self.patchers = [patch.object(launcher, 'CFG_PATH', self.config),
++                         patch.object(launcher, 'LOG_PATH', self.work / 'test.log'),
++                         patch.object(launcher, 'EXE_PATH', self.exe),
++                         patch.object(launcher, 'is_controller_connected', return_value=False)]
++        for item in self.patchers: item.start()
++        self.windows = []
++        self.window = self.open_window()
++
++    def open_window(self):
++        window = launcher.PrelauncherWindow()
++        self.windows.append(window)
++        return window
++
++    def tearDown(self):
++        for window in self.windows: window.close()
++        for item in reversed(self.patchers): item.stop()
++        for file in self.work.iterdir(): file.unlink()
++        self.work.rmdir()
++
++    def test_initial_labels_match_saved_limit_without_rewriting_config(self):
++        before = self.config.read_bytes()
++        self.assertEqual(self.window.fps_limit, 120)
++        self.assertIn('120 FPS', self.window.status_lbl.text())
++        self.assertIn('120 FPS', self.window.goal_exp_lbl.text())
++        self.assertEqual(self.open_window().fps_limit_seg.active_key, '120')
++        self.assertEqual(before, self.config.read_bytes())
++
++    def test_shader_prepare_partial_result_remains_visible(self):
++        with patch.object(launcher.ShaderPrepareWorker, 'start'):
++            dialog = launcher.ShaderPrepareDialog(self.window, {})
++        dialog.on_progress(10, 10, 100, 9, 0, 1)
++        self.assertIn('Checked', dialog.status_lbl.text())
++        dialog.on_finished(2)
++        self.assertIn('failures', dialog.status_lbl.text())
++        self.assertIn('shader-prepare.log', dialog.details_lbl.text())
++        self.assertNotEqual(dialog.result(), launcher.QDialog.DialogCode.Accepted)
++        dialog.close()
++
++    def test_shader_prepare_worker_preserves_diagnostics_and_partial_exit(self):
++        from types import SimpleNamespace
++        process = SimpleNamespace(stdout=iter([
++            '[shader-prepare] 10/10 (100.0%) - cached: 9, compiled: 0, failed: 1\n',
++            '[shader-prepare] FAILED key=fixture\n']), wait=lambda: None, returncode=2)
++        worker = launcher.ShaderPrepareWorker({})
++        results, progress = [], []
++        worker.finished.connect(results.append)
++        worker.progress_updated.connect(lambda *args: progress.append(args))
++        with patch.object(launcher.subprocess, 'Popen', return_value=process) as start:
++            worker.run()
++        self.assertEqual(results, [2])
++        self.assertEqual(progress, [(10, 10, 100.0, 9, 0, 1)])
++        self.assertIn('--prepare-only', start.call_args.args[0])
++        self.assertIn('FAILED key=fixture', (self.work / 'shader-prepare.log').read_text())
++
++    def test_each_cap_is_saved_and_restored_from_real_buttons(self):
++        for fps in (60, 90, 120):
++            self.window.fps_limit_seg.buttons[str(fps)].click()
++            saved = launcher.read_config()
++            self.assertEqual(saved['TOTK_UNCAPPED_HZ'], str(fps))
++            self.assertEqual(saved['TOTK_DYNAMIC_FPS'], '1')
++            self.assertEqual(saved['TOTK_FPS60'], '1')
++            restored = self.open_window()
++            self.assertEqual(restored.fps_limit, fps)
++            self.assertEqual(restored.fps_goal, 'smooth')
++            self.assertIn(f'{fps} FPS', restored.goal_exp_lbl.text())
++
++    def test_quiet_and_balanced_round_trip_and_keep_smooth_preference(self):
++        self.window.fps_limit_seg.buttons['90'].click()
++        for goal, operation in [('quiet', 'handheld'), ('balanced', 'docked')]:
++            self.window.fps_seg.buttons[goal].click()
++            saved = launcher.read_config()
++            self.assertEqual(saved['TOTK_UNCAPPED'], '0')
++            self.assertEqual(saved['TOTK_FPS60'], '0')
++            self.assertEqual(saved['TOTK_UNCAPPED_HZ'], '30')
++            self.assertEqual(saved['TOTK_OPERATION_MODE'], operation)
++            restored = self.open_window()
++            self.assertEqual(restored.fps_goal, goal)
++            self.assertTrue(restored.fps_limit_seg.isHidden())
++            restored.fps_seg.buttons['smooth'].click()
++            self.assertEqual(launcher.read_config()['TOTK_UNCAPPED_HZ'], '90')
++            self.assertFalse(restored.fps_limit_seg.isHidden())
++
++    def test_launch_uses_exact_saved_values_and_overrides_stale_environment(self):
++        self.window.fps_limit_seg.buttons['90'].click()
++        self.window.set_resolution('2560x1440')
++        self.window.set_window_mode('windowed')
++        stale = {'TOTK_DYNAMIC_FPS': '0', 'TOTK_REALTIME': '0', 'TOTK_FPS60': '0',
++                 'TOTK_UNCAPPED_HZ': '240', 'DM_PRESENT_HZ': '0', 'DM_PRESENT_INTERVAL': 'display'}
++        with patch.dict(os.environ, stale), patch.object(launcher.subprocess, 'Popen') as start:
++            self.window.launch_game()
++        start.assert_called_once()
++        args, kwargs = start.call_args
++        self.assertEqual(args[0], [str(self.exe)])
++        saved = launcher.read_config()
++        for key, value in self.window.runtime_settings().items():
++            self.assertEqual(kwargs['env'][key], saved[key])
++        self.assertEqual(kwargs['env']['TOTK_UNCAPPED_HZ'], '90')
++        self.assertNotIn('DM_PRESENT_HZ', kwargs['env'])
++        self.assertNotIn('DM_PRESENT_INTERVAL', kwargs['env'])
++        self.assertEqual(kwargs['env']['TOTK_WIDTH'], '2560')
++        self.assertEqual(kwargs['env']['TOTK_WINDOW_MODE'], 'windowed')
++
++    def test_saving_preserves_paths_comments_and_removes_duplicate_managed_keys(self):
++        with self.config.open('a') as file:
++            file.write(' TOTK_UNCAPPED_HZ = 60\nTOTK_UNCAPPED_HZ=90\n')
++        self.window.fps_limit_seg.buttons['60'].click()
++        text = self.config.read_text()
++        self.assertIn('# Keep this comment', text)
++        self.assertIn('textures=custom/textures', text)
++        self.assertEqual(text.count('TOTK_UNCAPPED_HZ='), 1)
++        self.assertEqual(launcher.read_config()['TOTK_UNCAPPED_HZ'], '60')
++
++    def test_save_error_preserves_old_file_and_blocks_launch(self):
++        before = self.config.read_bytes()
++        with patch.object(pathlib.Path, 'replace', side_effect=PermissionError('read only')), \
++             patch.object(launcher.QMessageBox, 'warning') as warning, \
++             patch.object(launcher.subprocess, 'Popen') as start:
++            self.window.launch_game()
++        warning.assert_called_once()
++        start.assert_not_called()
++        self.assertEqual(before, self.config.read_bytes())
++        self.assertFalse(self.config.with_name('ultratears.cfg.tmp').exists())
++
++    def test_all_quality_buttons_are_visible_in_grid_and_round_trip(self):
++        from display_config import RESOLUTIONS
++        for rid, _ in RESOLUTIONS:
++            button = self.window.detailed_res_btns[rid]
++            self.assertIsNotNone(button.parentWidget())
++            button.click()
++            saved = launcher.read_config()
++            w,h = rid.split('x')
++            self.assertEqual((saved['TOTK_INTERNAL_WIDTH'],saved['TOTK_INTERNAL_HEIGHT']),(w,h))
++            self.assertEqual(self.open_window().selected_res_id,rid)
++
++    def test_fit_switch_can_be_disabled_and_window_size_is_independent(self):
++        self.window.set_resolution('6144x3456')
++        self.window.set_window_mode('windowed')
++        self.window.window_width_spin.setValue(1000)
++        self.window.window_height_spin.setValue(777)
++        self.window.downscale_switch.setChecked(False)
++        saved=launcher.read_config()
++        self.assertEqual(saved['TOTK_DOWNSCALE'],'0')
++        self.assertEqual(saved['TOTK_FIT_SCREEN'],'0')
++        self.assertEqual((saved['TOTK_WINDOW_WIDTH'],saved['TOTK_WINDOW_HEIGHT']),('1000','777'))
++        restored=self.open_window()
++        self.assertFalse(restored.downscale_switch.isChecked())
++        self.assertEqual(restored.selected_res_id,'6144x3456')
++        self.assertEqual(restored.window_width_spin.value(),1000)
++        self.assertTrue(restored.window_width_spin.isEnabled())
++        restored.set_window_mode('borderless')
++        self.assertFalse(restored.window_width_spin.isEnabled())
++
++    def test_launch_overrides_stale_scene_window_drs_and_fit_aliases(self):
++        self.window.set_resolution('1280x720')
++        self.window.downscale_switch.setChecked(False)
++        stale={'TOTK_INTERNAL_WIDTH':'7680','TOTK_INTERNAL_HEIGHT':'4320','TOTK_DRS':'1',
++               'TOTK_WINDOW_WIDTH':'7680','TOTK_FIT_SCREEN':'1','TOTK_NO_OVERRIDE_VP':'1'}
++        with patch.dict(os.environ,stale),patch.object(launcher.subprocess,'Popen') as start:
++            self.window.launch_game()
++        launched=start.call_args.kwargs['env']
++        self.assertEqual((launched['TOTK_INTERNAL_WIDTH'],launched['TOTK_INTERNAL_HEIGHT']),('1280','720'))
++        self.assertEqual(launched['TOTK_DRS'],'0')
++        self.assertEqual(launched['TOTK_FIT_SCREEN'],'0')
++        self.assertEqual(launched['TOTK_WINDOW_WIDTH'],'1280')
++        self.assertNotIn('TOTK_NO_OVERRIDE_VP',launched)
++
++    def test_invalid_limit_falls_back_to_a_supported_choice(self):
++        self.config.write_text('TOTK_UNCAPPED=1\nTOTK_UNCAPPED_HZ=display\n')
++        restored = self.open_window()
++        self.assertEqual(restored.fps_limit, 60)
++        self.assertEqual(restored.fps_limit_seg.active_key, '60')
++
++    def test_shadow_resolution_selection_and_config_round_trip(self):
++        self.assertEqual(self.window.selected_shadow_res, '1024')
++        self.assertIn('Shadow 1024x', self.window.status_lbl.text())
++        self.window.set_shadow_resolution('2048')
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_SHADOW_RES'], '2048')
++        self.assertIn('Shadow 2048x', self.window.status_lbl.text())
++        restored = self.open_window()
++        self.assertEqual(restored.selected_shadow_res, '2048')
++        self.assertIn('Shadow 2048x', restored.status_lbl.text())
++
++    def test_xess_sr_toggle_and_mode_round_trip(self):
++        self.assertFalse(self.window.xess_sr_on)
++        self.window.set_xess_sr_enabled(True)
++        self.window.set_xess_sr_mode('performance')
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_XESS_SR'], '1')
++        self.assertEqual(saved['TOTK_XESS_SR_MODE'], 'performance')
++        self.assertNotIn('TOTK_DLSS', saved)
++        self.assertIn('XeSS (Performance)', self.window.status_lbl.text())
++        restored = self.open_window()
++        self.assertTrue(restored.xess_sr_on)
++        self.assertEqual(restored.selected_xess_sr_mode, 'performance')
++        self.assertIn('XeSS (Performance)', restored.status_lbl.text())
++
++    def test_xess_sr_render_resolution_downscaling(self):
++        self.window.set_resolution('2560x1440')
++        self.window.set_xess_sr_enabled(True)
++
++        for mode, expected_w, expected_h in [
++            ('ultra_quality_plus', '1920', '1080'),
++            ('ultra_quality', '1920', '1080'),
++            ('quality', '1920', '1080'),
++            ('balanced', '1600', '900'),
++            ('performance', '1280', '720'),
++            ('ultra_performance', '1280', '720'),
++            ('aa', '2560', '1440'),
++        ]:
++            self.window.set_xess_sr_mode(mode)
++            saved = launcher.read_config()
++            self.assertEqual(saved['TOTK_INTERNAL_WIDTH'], expected_w)
++            self.assertEqual(saved['TOTK_INTERNAL_HEIGHT'], expected_h)
++            self.assertEqual(saved['TOTK_TARGET_WIDTH'], '2560')
++            self.assertEqual(saved['TOTK_TARGET_HEIGHT'], '1440')
++            self.assertEqual(saved['TOTK_WIDTH'], '2560')
++            self.assertEqual(saved['TOTK_HEIGHT'], '1440')
++            self.assertEqual(launcher.scene_resolution(saved), '2560x1440')
++
++        self.window.set_xess_sr_enabled(False)
++        saved = launcher.read_config()
++        self.assertEqual(saved['TOTK_INTERNAL_WIDTH'], '2560')
++        self.assertEqual(saved['TOTK_INTERNAL_HEIGHT'], '1440')
++
++
++if __name__ == '__main__':
++    unittest.main(verbosity=2)

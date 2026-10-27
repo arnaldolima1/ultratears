@@ -1,0 +1,52 @@
+PR #24 — fix(lifter): fall back to 'all' for single unconfirmed jump-table targets (save-load crash)
+Estado: OPEN   Autor: PashaKagan   Criado: 2026-10-27T05:07:17Z   Atualizado: 2026-10-27T05:12:17Z
+Branch: fix-jumptable-single-target -> main   +7 -0 em 1 arquivos
+URL: https://github.com/kuraeow/ultratears/pull/24
+
+=== Descrição ===
+Fixes #18.
+
+### Problem
+Loading any save crashed with `FATAL: no function at 8006eb850`. The `br x12` at main 0x8006eb84c is a byte jump table with 7 targets. The table register `x28` is set once (`adrp`/`add`, at 0x8006eaeb0) and reused for other values before the `br`. So:
+- the emulation in `jump_table()` reads the table at the scratch address and finds a single target (0x8006eb7b0);
+- `_jump_table_scan` gives up, because the closest earlier write of `x28` is not the `adrp`/`add` pair;
+- `jump_table()` then returned that single unconfirmed target, so the other 6 targets were never labels.
+
+### Change
+When the scan can't confirm the table and the emulation found at most one target, `jump_table()` returns `None`. The `br` then gets the existing `computed_target` → `'all'` fallback, as any unresolved table does. 7 lines, in `tools/lifter/gen.py` only.
+
+### Scope and testing
+- On main (1.4.3) this changes 3 `br`s (`jumptables_single_unconfirmed: 3` in the lifter stats). The jump tables that already resolve are unchanged.
+- Tested on Windows (RTX 4090 laptop): lift + compile, then load a save made on 1.4.3 and play. Before the change, it crashed every time while the save loaded.
+- An alternative I tried and dropped: widening `_jump_table_scan` to accept any single `adrp`+`add` of the table register in the function. It fixed 0x8006eb84c, but it turned main 0x801553050 (which had `'all'`) into a 43-target table missing 0x8015485b0, and the game crashed later with `no function at 8015485b0`. The fallback here is the conservative version.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+=== Arquivos ===
+  tools/lifter/gen.py (+7 -0)
+
+=== Comentários ===
+(sem comentários)
+
+=== Revisões ===
+(sem revisões)
+
+=== Diff ===
+diff --git a/tools/lifter/gen.py b/tools/lifter/gen.py
+index 705b0fc..2004b42 100644
+--- a/tools/lifter/gen.py
++++ b/tools/lifter/gen.py
+@@ -128,6 +128,13 @@ def jump_table(self, br_pc, entry, end):
+         if r is not None and s is not None:
+             self.stats['jumptables_single_target_rescanned'] += 1
+             return sorted(set(r) | set(s))
++        if s is None and r is not None and len(set(r)) <= 1:
++            # [TOTK] A single target the image scan cannot confirm comes from an emulation that read the table at a
++            # scratch address: the table register is set once, far above the br, and reused in between (main 0x8006eb84c,
++            # the save-load crash "no function at 8006eb850": 1 of its 7 targets). Every instruction of the function is
++            # a target then ('all', as for any unresolved table) instead of that one guess. 3 brs in main.
++            self.stats['jumptables_single_unconfirmed'] += 1
++            return None
+         return r if r is not None else s
+ 
+     def _jump_table_scan(self, br_pc, entry, end):
