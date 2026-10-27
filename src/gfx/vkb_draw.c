@@ -1370,14 +1370,15 @@ void vkb_draw_stats(uint64_t *draws, uint64_t *skipped) {
 }
 
 // TOTK_VK_DRAWTRACE=<frame>:<n>: n draws from that present on (development): targets, shaders, counts, outcome.
+static long long g_trace_at = -1, g_trace_left;
+void vkb_draw_trace_arm(uint64_t frame, long long n) { g_trace_left = n; g_trace_at = (long long)frame; }   // F9 (vkb_dump_request)
 static int draw_trace(void) {
-    static long long at = -1, left;
-    if (at == -1) {
+    if (g_trace_at == -1) {
         const char *e = getenv("TOTK_VK_DRAWTRACE");
-        at = e ? atoll(e) : 0;
-        left = e && strchr(e, ':') ? atoll(strchr(e, ':') + 1) : 200;
+        g_trace_at = e ? atoll(e) : 0;
+        g_trace_left = e && strchr(e, ':') ? atoll(strchr(e, ':') + 1) : 200;
     }
-    return at > 0 && vkb_frame() >= (uint64_t)at && left-- > 0;
+    return g_trace_at > 0 && vkb_frame() >= (uint64_t)g_trace_at && g_trace_left-- > 0;
 }
 // ---------------- GPU profile (development) ----------------
 // TOTK_GPU_PROF=<present>: a timestamp before and after every draw and dispatch of that frame; the next present prints
@@ -1590,6 +1591,62 @@ void vkb_draw(const uint8_t *a, int indexed) {
                  S.has_dr ? "set" : "-", S.dr[0], S.dr[1], S.nvp ? S.vp[0][4] : 0.0f, S.nvp ? S.vp[0][5] : 1.0f,
                  S.has_poly && (S.poly.offset_en & 4) ? "on" : "off", S.po.units, S.po.factor, S.po.clamp, S.depth_clamp,
                  r->depth ? "yes" : "no", r->depth ? r->depth->d.format : 0);
+        }
+        {   // vertex input: attributes (stream, offset, NVN format) and the streams' buffers; the index buffer
+            char vl[1024];
+            int vn = 0;
+            uint32_t used = 0;
+            for (int i = 0; i < S.nvattr && vn < (int)sizeof vl - 64; i++) {
+                va_st a;
+                memcpy(&a, &S.vattr[i], sizeof a);
+                if (!a.fmt) continue;
+                used |= 1u << a.stream;
+                vn += snprintf(vl + vn, sizeof vl - (size_t)vn, " a%d=s%u+%u/%#x", i, (unsigned)a.stream, (unsigned)a.offset, (unsigned)a.fmt);
+            }
+            for (uint32_t s = 0; s < 16 && vn < (int)sizeof vl - 80; s++)
+                if (used >> s & 1)
+                    vn += snprintf(vl + vn, sizeof vl - (size_t)vn, " | s%u=%#llx+%llu stride %u%s", s, (unsigned long long)S.vbuf[s].address,
+                                   (unsigned long long)S.vbuf[s].size, (unsigned)S.vstream[s].stride, S.vstream[s].divisor ? " instanced" : "");
+            if (indexed) snprintf(vl + vn, sizeof vl - (size_t)vn, " | index %#llx type %d base %d first inst %d", (unsigned long long)di->ibuf,
+                                  di->itype, di->base_vertex, di->base_instance);
+            static uint32_t traced;   // the number vkb_vcheck reports a draw by
+            uint32_t no = ++traced;
+            VLOG("[draw]   vertex #%u:%s", no, vl);
+            // the ranges the draw reads, for vkb_vcheck after the dump; indices past the end of a per-vertex stream in
+            // game memory itself are reported here (the vertices such a draw reads are garbage)
+            uint32_t isz = indexed ? (di->itype == 0 ? 1u : di->itype == 1 ? 2u : 4u) : 0;
+            if (indexed && di->ibuf) vkb_vcheck_add(di->ibuf, (uint64_t)di->count * isz, no, 0);
+            for (uint32_t s = 0; s < 16; s++)
+                if (used >> s & 1 && S.vbuf[s].address && S.vbuf[s].size) vkb_vcheck_add(S.vbuf[s].address, S.vbuf[s].size, no, 1);
+            for (int st = 0; st < 2; st++) {   // constants (object transforms) and storage buffers of both stages
+                const vkb_shader *sh = S.sh[st];
+                if (!sh) continue;
+                for (int slot = 3; slot < VKB_NCBUF; slot++) {
+                    const p_bind_buf *u = &S.ubo[st][slot - 3];
+                    if ((sh->cbuf_mask & (1u << slot)) && u->addr && u->size) vkb_vcheck_add(u->addr, u->size > 65536 ? 65536 : u->size, no, 2);
+                }
+                for (int i = 0; i < sh->nsbuf; i++) {
+                    uint64_t a, n;
+                    sbuf_range(sh, st, i, &a, &n);
+                    if (a && n && n <= (16u << 20)) vkb_vcheck_add(a, n, no, 3);
+                }
+            }
+            void *ihb;
+            uint64_t ihoff;
+            if (indexed && di->ibuf && di->count > 0 && mtl_addr(di->ibuf, (uint64_t)di->count * isz, &ihb, &ihoff)) {   // in game memory
+                uint64_t top = 0;
+                const uint8_t *ib = (const uint8_t *)(uintptr_t)di->ibuf;
+                uint32_t restart = isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+                for (int i = 0; i < di->count; i++) {
+                    uint32_t v = isz == 1 ? ib[i] : isz == 2 ? ((const uint16_t *)ib)[i] : ((const uint32_t *)ib)[i];
+                    if (v != restart && v > top) top = v;
+                }
+                top += (uint64_t)(int64_t)di->base_vertex;
+                for (uint32_t s = 0; s < 16; s++)
+                    if (used >> s & 1 && !S.vstream[s].divisor && S.vstream[s].stride && top >= S.vbuf[s].size / S.vstream[s].stride)
+                        VLOG("[vcheck] draw #%u: index up to %llu, stream %u holds %llu vertices (in game memory)", no, (unsigned long long)top, s,
+                             (unsigned long long)(S.vbuf[s].size / S.vstream[s].stride));
+            }
         }
         if (S.sh[0]) trace_resources(S.sh[0], 0);
         if (S.sh[1]) trace_resources(S.sh[1], 1);

@@ -1399,6 +1399,89 @@ static void shot_write(uint64_t fence, uint32_t w, uint32_t h) {
     vk.vkFreeMemory(vkc.device, g_shot_mem, NULL);
     g_shot_buf = VK_NULL_HANDLE;
 }
+static _Atomic long long g_dump_key_at;   // vkb_dump_request (F9)
+
+// F9 range check (development): the index, vertex, constant and storage ranges the traced draws read (vkb_vcheck_add), compared once the
+// GPU is idle between the pool's copy in device memory and game memory. A range that differs where the CPU has not
+// written since the copy's update means draws read different data than the game holds (the copy went wrong).
+typedef struct { uint64_t addr, len; uint32_t draw; int kind; } vrange_t;
+static vrange_t *g_vr;
+static int g_nvr, g_capvr;
+static pthread_mutex_t g_vr_mu = PTHREAD_MUTEX_INITIALIZER;
+void vkb_vcheck_add(uint64_t addr, uint64_t len, uint32_t draw, int kind) {
+    pthread_mutex_lock(&g_vr_mu);
+    int dup = 0;
+    for (int k = g_nvr - 1; k >= 0 && k >= g_nvr - 32 && !dup; k--) dup = g_vr[k].addr == addr && g_vr[k].len == len;
+    if (!dup && g_nvr < 20000) {
+        if (g_nvr == g_capvr && !(g_vr = realloc(g_vr, sizeof *g_vr * (size_t)(g_capvr = g_capvr ? g_capvr * 2 : 1024)))) die("range check");
+        g_vr[g_nvr++] = (vrange_t){addr, len, draw, kind};
+    }
+    pthread_mutex_unlock(&g_vr_mu);
+}
+static pool_ent *pool_find_mut(uintptr_t addr, uint64_t len);
+static void vcheck_run(void) {
+    enum { CAP = 64u << 20 };
+    VkBuffer st = VK_NULL_HANDLE;
+    VkDeviceMemory sm = VK_NULL_HANDLE;
+    uint8_t *map = NULL;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = CAP, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &st), "range check buffer")) return;
+    VkMemoryRequirements req;
+    vk.vkGetBufferMemoryRequirements(vkc.device, st, &req);
+    uint32_t type = UINT32_MAX, want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < vkc.memory.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((req.memoryTypeBits & (1u << i)) && (vkc.memory.memoryTypes[i].propertyFlags & want) == want) type = i;
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+    void *m;
+    if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &sm), "range check memory")) { vk.vkDestroyBuffer(vkc.device, st, NULL); return; }
+    vk.vkBindBufferMemory(vkc.device, st, sm, 0);
+    if (!vk_check(vk.vkMapMemory(vkc.device, sm, 0, VK_WHOLE_SIZE, 0, &m), "range check map")) goto out;
+    map = m;
+    static const char *const kinds[] = {"indices", "vertices", "constants", "storage"};
+    pthread_mutex_lock(&g_vr_mu);
+    int checked = 0, bad = 0, cpu = 0, said = 0;
+    for (int k = 0; k < g_nvr;) {   // in batches that fit the staging buffer
+        typedef struct { vrange_t r; VkDeviceSize at; uint64_t stamp; } item;
+        static item it[4096];
+        int n = 0;
+        VkDeviceSize used = 0;
+        mtl_sub_begin();
+        VkCommandBuffer cb = vkb_cmd();
+        vkb_rw_read(&g_pool_mu, LK_POOLS);
+        for (; k < g_nvr && n < 4096; k++) {
+            const vrange_t *r = &g_vr[k];
+            if (used + r->len > CAP) { if (!n) { k++; continue; } break; }   // larger than the buffer: not checked
+            pool_ent *p = pool_find_mut((uintptr_t)r->addr, r->len);
+            if (!p || !p->sh || !p->filled) continue;   // read from game memory itself: nothing to compare
+            VkBufferCopy c = {p->soff + (r->addr - p->base), used, r->len};
+            vk.vkCmdCopyBuffer(cb, p->sbuf, st, 1, &c);
+            it[n++] = (item){*r, used, p->stamp};
+            used += (r->len + 15) & ~15ull;
+        }
+        vkb_rw_read_end(&g_pool_mu);
+        mtl_wait(mtl_sub_commit(), UINT64_MAX);
+        for (int i = 0; i < n; i++) {
+            const uint8_t *g = (const uint8_t *)(uintptr_t)it[i].r.addr, *c = map + it[i].at;
+            uint64_t diff = 0, first = 0;
+            for (uint64_t b = 0; b < it[i].r.len; b++) if (g[b] != c[b]) { if (!diff++) first = b; }
+            checked++;
+            if (!diff) continue;
+            int wrote = nvn_dirty_since(g, it[i].r.len, it[i].stamp);
+            if (wrote) { cpu++; continue; }
+            bad++;
+            if (said++ < 200)
+                VLOG("[vcheck] draw #%u %s %#llx+%llu: the copy differs from game memory in %llu bytes (first at +%llu), no CPU write since its update",
+                     it[i].r.draw, kinds[it[i].r.kind & 3], (unsigned long long)it[i].r.addr, (unsigned long long)it[i].r.len,
+                     (unsigned long long)diff, (unsigned long long)first);
+        }
+    }
+    VLOG("[vcheck] %d ranges of the traced draws compared: %d differ with no CPU write, %d differ where the CPU wrote since", checked, bad, cpu);
+    g_nvr = 0;
+    pthread_mutex_unlock(&g_vr_mu);
+out:
+    vk.vkDestroyBuffer(vkc.device, st, NULL);
+    vk.vkFreeMemory(vkc.device, sm, NULL);
+}
 // TOTK_DUMP=<present number>:<dir>: the frame's render targets (development); TOTK_DUMP_EXIT=1 then exits
 static void dump_check(uint64_t n) {
     static long long dump_at = -1;
@@ -1409,6 +1492,30 @@ static void dump_check(uint64_t n) {
         vkb_tex_dump(dump_dir);
         if (getenv("TOTK_DUMP_EXIT")) { fflush(NULL); _Exit(0); }   // short development runs: done after the dump
     }
+    static long long auto_at = -1;   // TOTK_DUMP_KEY_AT=<present>: F9 pressed there (scripted runs)
+    if (auto_at == -1) { const char *e = getenv("TOTK_DUMP_KEY_AT"); auto_at = e ? atoll(e) : 0; }
+    if (auto_at > 0 && n >= (uint64_t)auto_at) { auto_at = 0; vkb_dump_request(); }
+    long long key_at = atomic_load(&g_dump_key_at);   // F9 with TOTK_DUMP_KEY=<dir>: <dir>/f<present>, the game goes on
+    if (key_at > 0 && n >= (uint64_t)key_at && atomic_compare_exchange_strong(&g_dump_key_at, &key_at, 0)) {
+        char dir[512];
+        snprintf(dir, sizeof dir, "%s/f%llu", getenv("TOTK_DUMP_KEY"), (unsigned long long)n);
+        CreateDirectoryA(getenv("TOTK_DUMP_KEY"), NULL);
+        CreateDirectoryA(dir, NULL);
+        vkb_tex_dump(dir);
+        vcheck_run();
+        VLOG("F9: frame %llu dumped to %s (its draws traced above)", (unsigned long long)n, dir);
+    }
+}
+// TOTK_DUMP_KEY=<dir> (development: catching what a person sees while playing): F9 traces the draws of the next frames
+// (TOTK_VK_DRAWTRACE) and dumps the render targets of the frame after them. Those frames are recorded on one thread
+// (vkb_mt_on), the rest of the game as usual.
+void vkb_dump_request(void) {
+    const char *d = getenv("TOTK_DUMP_KEY");
+    if (!d || !*d || atomic_load(&g_dump_key_at)) return;
+    uint64_t f = vkb_frame();
+    vkb_draw_trace_arm(f + 1, 6000);   // about two frames on the island
+    atomic_store(&g_dump_key_at, (long long)f + 3);
+    VLOG("F9: tracing from frame %llu, dump at %llu", (unsigned long long)f + 1, (unsigned long long)f + 3);
 }
 
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
@@ -1785,7 +1892,7 @@ int vkb_mt_on(void) {
         VLOG("recording threads: %d%s%s", n, why ? " (one: " : "", why ? why : "");
         if (why) VLOG("  (one thread while %s is set)", why);
     }
-    return n > 1;
+    return n > 1 && !atomic_load(&g_dump_key_at);   // F9 (TOTK_DUMP_KEY): its traced frames on one thread, in order
 }
 
 static VkCommandBuffer wp_get(int slot, int w) {   // a command buffer of that thread's pool for the slot, begun

@@ -189,6 +189,11 @@ _Noreturn void window_loop(void) {
                         toggle_fullscreen();
                         break;
                     }
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F9) {
+                        void vkb_dump_request(void);   // gfx/vkb.h: TOTK_DUMP_KEY (development)
+                        vkb_dump_request();
+                        break;
+                    }
                     int k = mac_key(e.key.scancode);
                     if (k >= 0 && !e.key.repeat) runtime_input_key((unsigned)k, e.type == SDL_EVENT_KEY_DOWN);
                     break;
