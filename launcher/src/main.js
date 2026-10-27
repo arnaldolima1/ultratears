@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { setLang } from './i18n.js';
 
 const win = getCurrentWindow();
 const $ = (s) => document.querySelector(s);
@@ -840,6 +841,10 @@ function playIntro() {
   addEventListener('keydown', end);
   setTimeout(end, 3600);
 }
+// Language (i18n.js): the saved choice, else the system's
+setLang(prefs.lang || (navigator.language.toLowerCase().startsWith('pt') ? 'pt' : 'en'));
+$('#set-lang').value = prefs.lang || (navigator.language.toLowerCase().startsWith('pt') ? 'pt' : 'en');
+$('#set-lang').onchange = (e) => { prefs.lang = e.target.value; savePrefs(); setLang(prefs.lang); };
 playIntro();
 $('#set-intro').checked = prefs.intro !== false;
 $('#set-intro').onchange = (e) => { prefs.intro = e.target.checked; savePrefs(); };
