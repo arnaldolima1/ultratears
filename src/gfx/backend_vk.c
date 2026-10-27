@@ -177,9 +177,13 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     g_pool_bytes += hi - lo;
     static unsigned said;
     if (said++ < 4) VLOG("memory pool %p+%#llx imported (%d pools, %.1f MiB)", mem, (unsigned long long)size, g_npools, g_pool_bytes / 1048576.0);
+    else if (vkc.has_checkpoints || vkc.has_buffer_marker)   // with the deletions: a lost device's copies against the pool table
+        VLOG("memory pool %p %#llx..%#llx imported as %#llx..%#llx (present %llu)", mem, (unsigned long long)lo, (unsigned long long)hi,
+             (unsigned long long)a, (unsigned long long)b, (unsigned long long)vkb_frame());
     vkb_rw_write_end(&g_pool_mu);
 }
 
+static void destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem, VkBuffer buf);
 void mtl_pool_del(const void *mem) {
     if (g_ok != 1) return;
     pool_ent e = {0};
@@ -196,11 +200,12 @@ void mtl_pool_del(const void *mem) {
     if (e.buf) wb_forget(e.buf);
     vkb_rw_write_end(&g_pool_mu);
     if (!e.buf) return;
-    if (vkc.has_checkpoints) VLOG("memory pool %p %#llx..%#llx deleted (present %llu)", mem, (unsigned long long)e.lo, (unsigned long long)e.hi, (unsigned long long)vkb_frame());
+    if (vkc.has_checkpoints || vkc.has_buffer_marker) VLOG("memory pool %p %#llx..%#llx deleted (present %llu)", mem, (unsigned long long)e.lo, (unsigned long long)e.hi, (unsigned long long)vkb_frame());
     // The frontend drains the queue before it deletes a pool (hle_nvn.c x_drain); the GPU may still be finishing.
     mtl_finish();
-    vk.vkDestroyBuffer(vkc.device, e.buf, NULL);
-    vk.vkFreeMemory(vkc.device, e.mem, NULL);
+    // A submission of another game thread may be being recorded already and have copied from the pool (the copies of
+    // recently used pools at its start, sync_gather): the import goes when that submission is done (destroy_later).
+    destroy_later(VK_NULL_HANDLE, VK_NULL_HANDLE, e.mem, e.buf);
 }
 
 void mtl_pool_invalidate(const pool_t *p, uint64_t off, uint64_t n) { (void)p; (void)off; (void)n; }   // zero-copy: nothing cached
@@ -241,7 +246,7 @@ static wb_t *g_wb;                 // GPU-written ranges of copies in this submi
 static int g_nwb, g_capwb;
 static VkBufferCopy *g_runs;       // copies being gathered (sync_gather / sync_flush)
 static int g_nruns, g_caruns;
-typedef struct { VkBuffer src, dst; int first, n; } run_grp;
+typedef struct { VkBuffer src, dst; int first, n; uint64_t base; } run_grp;   // base: the source pool's import address
 static run_grp *g_grp;
 static int g_ngrp, g_capgrp;
 static uint64_t g_shadow_budget, g_presync_sub;
@@ -252,7 +257,7 @@ static void shadow_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAcce
     VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vk.vkCmdPipelineBarrier2(cb, &dep);
 }
-static void run_put(VkBuffer src, VkBuffer dst, VkDeviceSize soff, VkDeviceSize doff, VkDeviceSize n) {
+static void run_put(VkBuffer src, VkBuffer dst, VkDeviceSize soff, VkDeviceSize doff, VkDeviceSize n, uint64_t base) {
     if (g_nruns == g_caruns) {
         g_caruns = g_caruns ? g_caruns * 2 : 256;
         if (!(g_runs = realloc(g_runs, sizeof *g_runs * (size_t)g_caruns))) die("pool copy runs");
@@ -262,7 +267,7 @@ static void run_put(VkBuffer src, VkBuffer dst, VkDeviceSize soff, VkDeviceSize 
             g_capgrp = g_capgrp ? g_capgrp * 2 : 64;
             if (!(g_grp = realloc(g_grp, sizeof *g_grp * (size_t)g_capgrp))) die("pool copy groups");
         }
-        g_grp[g_ngrp++] = (run_grp){src, dst, g_nruns, 0};
+        g_grp[g_ngrp++] = (run_grp){src, dst, g_nruns, 0, base};
     }
     g_runs[g_nruns++] = (VkBufferCopy){soff, doff, n};
     g_grp[g_ngrp - 1].n++;
@@ -271,7 +276,7 @@ static void run_put(VkBuffer src, VkBuffer dst, VkDeviceSize soff, VkDeviceSize 
 static void run_written(void *ctx, size_t off, size_t n) {   // nvn_dirty_runs: off from the pool's start
     const pool_ent *p = ctx;
     VkDeviceSize o = (p->lo - p->base) + off;
-    run_put(p->buf, p->sbuf, o, p->soff + o, n);
+    run_put(p->buf, p->sbuf, o, p->soff + o, n, p->base);
 }
 static void sync_flush(void) {   // the gathered copies, outside a pass (threads recording: in the prologue)
     if (!g_nruns) return;
@@ -282,7 +287,18 @@ static void sync_flush(void) {   // the gathered copies, outside a pass (threads
     vkb_checkpoint("pool copies in", NULL, NULL);
     shadow_barrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    for (int g = 0; g < g_ngrp; g++) vk.vkCmdCopyBuffer(cb, g_grp[g].src, g_grp[g].dst, (uint32_t)g_grp[g].n, &g_runs[g_grp[g].first]);
+    for (int g = 0; g < g_ngrp; g++) {
+        if (vkc.has_checkpoints || vkc.has_buffer_marker) {   // which pool each copy reads (a lost device stopped in one, 2026-10-27)
+            const VkBufferCopy *r = &g_runs[g_grp[g].first];
+            VkDeviceSize n = 0;
+            for (int k = 0; k < g_grp[g].n; k++) n += r[k].size;
+            char k1[32], k2[32];
+            snprintf(k1, sizeof k1, "%llx", (unsigned long long)(g_grp[g].base + r[0].srcOffset));
+            snprintf(k2, sizeof k2, "%d runs %llu bytes", g_grp[g].n, (unsigned long long)n);
+            vkb_checkpoint("pool copy in", k1, k2);
+        }
+        vk.vkCmdCopyBuffer(cb, g_grp[g].src, g_grp[g].dst, (uint32_t)g_grp[g].n, &g_runs[g_grp[g].first]);
+    }
     shadow_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     g_sh_in += (uint64_t)g_nruns;
@@ -320,7 +336,7 @@ static int sync_gather(pool_ent *p, uint64_t sub, int may_end) {
     uint64_t bytes0 = g_sh_in_bytes;
     if (!p->filled) {
         nvn_dirty_since((const void *)p->lo, p->hi - p->lo, UINT64_MAX);   // writes so far are in the whole copy
-        run_put(p->buf, p->sbuf, 0, p->soff, p->bytes);
+        run_put(p->buf, p->sbuf, 0, p->soff, p->bytes, p->base);
     } else if (nvn_dirty_runs((const void *)p->lo, p->hi - p->lo, p->stamp, 65536, run_written, p) < 0) {
         p->no_shadow = 1;   // its writes can no longer be told
         vkb_shadow_free(p->sh); p->sh = 0;
@@ -695,17 +711,77 @@ enum { CKPT_RING = 1 << 16 };
 typedef struct { uint64_t frame; uint32_t n; const char *what; char k1[32], k2[32]; } ckpt_t;
 static ckpt_t *g_ckpt;
 static _Atomic uint32_t g_ckpt_n;
+// VK_AMD_buffer_marker: before each marked command the GPU writes its number at the top of the pipe (the commands before
+// it have started) and at the bottom (they have finished) into host memory, which can be read after the device is lost
+static VkBuffer g_mk_buf;
+static VkDeviceMemory g_mk_mem;
+static volatile uint32_t *g_mk;   // [0] top, [1] bottom: checkpoint number + 1
+static int marker_init(void) {
+    static int state;   // 0 not tried, 1 ready, -1 failed
+    if (state) return state > 0;
+    state = -1;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_mk_buf) != VK_SUCCESS) return 0;
+    VkMemoryRequirements req;
+    vk.vkGetBufferMemoryRequirements(vkc.device, g_mk_buf, &req);
+    uint32_t type = UINT32_MAX, want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < vkc.memory.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((req.memoryTypeBits & (1u << i)) && (vkc.memory.memoryTypes[i].propertyFlags & want) == want) type = i;
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+    void *m;
+    if (type == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &g_mk_mem) != VK_SUCCESS) return 0;
+    vk.vkBindBufferMemory(vkc.device, g_mk_buf, g_mk_mem, 0);
+    if (vk.vkMapMemory(vkc.device, g_mk_mem, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) return 0;
+    g_mk = m;
+    g_mk[0] = g_mk[1] = 0;
+    state = 1;
+    VLOG("checkpoints: GPU-written markers on (VK_AMD_buffer_marker)");
+    return 1;
+}
 void vkb_checkpoint(const char *what, const char *k1, const char *k2) {
-    if (!vkc.has_checkpoints) return;
+    if (!vkc.has_checkpoints && !vkc.has_buffer_marker) return;
     if (!g_ckpt && !(g_ckpt = calloc(CKPT_RING, sizeof *g_ckpt))) return;
     uint32_t n = atomic_fetch_add(&g_ckpt_n, 1), i = n % CKPT_RING;
     ckpt_t *c = &g_ckpt[i];
     c->frame = vkb_frame(); c->n = n; c->what = what;
     snprintf(c->k1, sizeof c->k1, "%s", k1 ? k1 : "-");
     snprintf(c->k2, sizeof c->k2, "%s", k2 ? k2 : "-");
-    vk.vkCmdSetCheckpointNV(vkb_cmd(), (void *)(uintptr_t)(i + 1));
+    VkCommandBuffer cb = vkb_cmd();
+    if (vkc.has_checkpoints) vk.vkCmdSetCheckpointNV(cb, (void *)(uintptr_t)(i + 1));
+    if (vkc.has_buffer_marker && marker_init()) {
+        vk.vkCmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_mk_buf, 0, n + 1);
+        vk.vkCmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_mk_buf, 4, n + 1);
+    }
+}
+static const pool_ent *pool_find(uintptr_t addr, uint64_t len);
+static void checkpoint_addr(const char *k1) {   // an address: what the memory and the pool table hold now
+    unsigned long long a = strtoull(k1, NULL, 16);
+    if (!a) return;
+    MEMORY_BASIC_INFORMATION mi = {0};
+    VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi);
+    vkb_rw_read(&g_pool_mu, LK_POOLS);
+    const pool_ent *p = pool_find((uintptr_t)a, 1);
+    VLOG("    memory %#llx: state %#lx protect %#lx region %p+%#llx; pool %s %#llx..%#llx", a, mi.State, mi.Protect, mi.BaseAddress,
+         (unsigned long long)mi.RegionSize, p ? "registered" : "none", p ? (unsigned long long)p->lo : 0ull, p ? (unsigned long long)p->hi : 0ull);
+    vkb_rw_read_end(&g_pool_mu);
+}
+static void checkpoint_line(const char *how, uint32_t n) {
+    const ckpt_t *c = &g_ckpt[n % CKPT_RING];
+    if (c->n != n) { VLOG("  %s #%u: no longer in the ring", how, n); return; }
+    VLOG("  %s #%u present %llu %s %s %s", how, n, (unsigned long long)c->frame, c->what, c->k1, c->k2);
+    checkpoint_addr(c->k1);
 }
 static void checkpoint_report(void) {
+    if (g_mk && g_ckpt) {   // the markers: commands after the bottom one up to the top one had started and not finished
+        uint32_t top = g_mk[0], bottom = g_mk[1], last = atomic_load(&g_ckpt_n);
+        VLOG("device lost: GPU markers: all finished before #%d, started up to #%d (last %u recorded)", (int)bottom - 1, (int)top - 1, last);
+        if (bottom && top >= bottom) {
+            uint32_t from = bottom - 1, to = top - 1 > from + 60 ? from + 60 : top - 1;
+            for (uint32_t k = from; k <= to; k++) checkpoint_line(k == from ? "in flight (first)" : "in flight", k);
+            if (top - 1 > to) VLOG("  ... %u more up to #%u", top - 1 - to, top - 1);
+        }
+        for (uint32_t k = top; k < top + 3 && k < last; k++) checkpoint_line("not started", k);
+    }
     if (!vkc.has_checkpoints || !g_ckpt) return;
     VkCheckpointDataNV d[16];
     uint32_t n = 16;
@@ -719,16 +795,7 @@ static void checkpoint_report(void) {
         if (!m || m > CKPT_RING) continue;
         const ckpt_t *c = &g_ckpt[m - 1];
         VLOG("  stage %#llx: #%u present %llu %s %s %s", (unsigned long long)d[i].stage, c->n, (unsigned long long)c->frame, c->what, c->k1, c->k2);
-        unsigned long long a = strtoull(c->k1, NULL, 16);
-        if (a) {   // an address: what the memory and the pool table hold now
-            MEMORY_BASIC_INFORMATION mi = {0};
-            VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi);
-            vkb_rw_read(&g_pool_mu, LK_POOLS);
-            const pool_ent *p = pool_find((uintptr_t)a, 1);
-            VLOG("    memory %#llx: state %#lx protect %#lx region %p+%#llx; pool %s %#llx..%#llx", a, mi.State, mi.Protect, mi.BaseAddress,
-                 (unsigned long long)mi.RegionSize, p ? "registered" : "none", p ? (unsigned long long)p->lo : 0ull, p ? (unsigned long long)p->hi : 0ull);
-            vkb_rw_read_end(&g_pool_mu);
-        }
+        checkpoint_addr(c->k1);
     }
 }
 
@@ -736,17 +803,20 @@ static void checkpoint_report(void) {
 // texture view replaced in the middle of a frame, a texture the game finalizes). Destroying them after waiting for the
 // last submitted work (as before) freed what the open submission still referred to: the GPU read a destroyed view and
 // the device was lost (TOTK's item-get screen, 2026-10-24). Now each waits for the first submission after it was given up.
-typedef struct dead { uint64_t fence; VkImageView view; VkImage img; VkDeviceMemory mem; struct dead *next; } dead;
+// Deleted memory pools' imports too (mtl_pool_del): another game thread's submission, recorded while the pool was being
+// deleted, brought the copies of recently used pools up to date from it (2026-10-27, L16).
+typedef struct dead { uint64_t fence; VkImageView view; VkImage img; VkDeviceMemory mem; VkBuffer buf; struct dead *next; } dead;
 static dead *g_dead_new, *g_dead;   // given up since the last submission (no fence yet) / waiting for their fence
 static pthread_mutex_t g_dead_mu = PTHREAD_MUTEX_INITIALIZER;
-void vkb_destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem) {
+static void destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem, VkBuffer buf) {
     dead *d = malloc(sizeof *d);
     if (!d) die("deferred destruction");
-    *d = (dead){0, view, img, mem, NULL};
+    *d = (dead){0, view, img, mem, buf, NULL};
     pthread_mutex_lock(&g_dead_mu);
     d->next = g_dead_new; g_dead_new = d;
     pthread_mutex_unlock(&g_dead_mu);
 }
+void vkb_destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem) { destroy_later(view, img, mem, VK_NULL_HANDLE); }
 static void dead_tag(uint64_t fence) {   // a submission: what was given up so far waits for it
     pthread_mutex_lock(&g_dead_mu);
     while (g_dead_new) { dead *d = g_dead_new; g_dead_new = d->next; d->fence = fence; d->next = g_dead; g_dead = d; }
@@ -763,6 +833,7 @@ static void dead_reap(uint64_t done) {   // the GPU finished up to `done`
         dead *d = free_list; free_list = d->next;
         if (d->view) vk.vkDestroyImageView(vkc.device, d->view, NULL);
         if (d->img) vk.vkDestroyImage(vkc.device, d->img, NULL);
+        if (d->buf) vk.vkDestroyBuffer(vkc.device, d->buf, NULL);
         if (d->mem) vk.vkFreeMemory(vkc.device, d->mem, NULL);
         free(d);
     }
