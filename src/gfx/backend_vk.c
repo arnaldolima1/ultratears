@@ -1387,6 +1387,21 @@ static void pass_end_why(int why) { if (g_in_pass) vkb_cnt_add(vkb_pass_end_n[wh
 void vkb_pass_end_r(int why) { pass_end_why(why); }
 void vkb_pass_end(void) { pass_end_why(PE_OTHER); }
 
+// The area a clear covers: on NVN (as in GL) clears are limited to the scissor rectangle. TOTK builds the Depths'
+// revealed-area mask (500x400) in 50x50 tiles, clearing each tile under its scissor before drawing it; clearing the
+// whole target wiped the tiles drawn before, so the mask stayed empty: the Depths' ground dark and its map unrevealed
+// (L20, 2026-10-27). TOTK_VK_CLEAR_SCISSOR=0: whole target as before (A/B).
+static VkRect2D clear_rect(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_VK_CLEAR_SCISSOR"); on = !e || *e != '0'; }
+    VkRect2D full = {{0, 0}, g_pass_extent}, s;
+    if (!on || !vkb_scissor(&s)) return full;
+    int32_t x0 = s.offset.x, y0 = s.offset.y, x1 = x0 + (int32_t)s.extent.width, y1 = y0 + (int32_t)s.extent.height;
+    if (x1 > (int32_t)g_pass_extent.width) x1 = (int32_t)g_pass_extent.width;
+    if (y1 > (int32_t)g_pass_extent.height) y1 = (int32_t)g_pass_extent.height;
+    if (x1 <= x0 || y1 <= y0) return (VkRect2D){{0, 0}, {0, 0}};
+    return (VkRect2D){{x0, y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
+}
 static void clear_color(const p_clear_color *c) {
     if (trace_left()) {
         VkRect2D s = {0};
@@ -1412,7 +1427,8 @@ static void clear_color(const p_clear_color *c) {
     const nvn_texdesc *d = im ? &im->d : NULL;
     if (d && (d->format == 0x27 || d->format == 0x28 || d->format == 0x2C || d->format == 0x2D || d->format == 0x2F || d->format == 0x30))
         for (int k = 0; k < 4; k++) a.clearValue.color.uint32[k] = (uint32_t)c->rgba[k];   // integer targets (NVN takes float values)
-    VkClearRect r = {{{0, 0}, g_pass_extent}, 0, 1};
+    VkClearRect r = {clear_rect(), 0, 1};
+    if (!r.rect.extent.width || !r.rect.extent.height) return;
     vkb_checkpoint("clear attachment", NULL, NULL);
     vk.vkCmdClearAttachments(vkb_cmd(), 1, &a, 1, &r);
 }
@@ -1429,7 +1445,8 @@ static void clear_ds(const p_clear_ds *c) {
         static int said; if (!said++) VLOG("[temporary] stencil clear with write mask %#x: cleared fully", c->stencil_mask);
     }
     VkClearAttachment a = {asp, 0, {.depthStencil = {c->depth, (uint32_t)c->stencil}}};
-    VkClearRect r = {{{0, 0}, g_pass_extent}, 0, 1};
+    VkClearRect r = {clear_rect(), 0, 1};
+    if (!r.rect.extent.width || !r.rect.extent.height) return;
     vkb_checkpoint("clear attachment", NULL, NULL);
     vk.vkCmdClearAttachments(vkb_cmd(), 1, &a, 1, &r);
 }
