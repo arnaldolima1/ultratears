@@ -53,7 +53,7 @@ static void read_cfg(const char *cfg, const char **exefs) {
         if (!eq || line[0] == '#') continue;
         *eq = 0;
         static const char *const keys[][2] = {   // the file's names -> the runtime's variables
-            {"romfs", "TOTK_ROMFS"}, {"shaders", "TOTK_SHADER_DIR"}, {"textures", "TOTK_BC7_DIR"},
+            {"romfs", "TOTK_ROMFS"}, {"shaders", "TOTK_SHADER_DIR"}, {"compiled", "TOTK_SHADER_BIN"}, {"textures", "TOTK_BC7_DIR"},
             {"saves", "TOTK_PROFILE_DIR"}, {"fonts", "TOTK_SHARED_FONTS"}};
         if (!strcmp(line, "exefs")) snprintf(g_exefs, sizeof g_exefs, "%s", eq + 1), *exefs = g_exefs;
         else if (!strncmp(line, "TOTK_", 5)) setenv(line, eq + 1, 0);

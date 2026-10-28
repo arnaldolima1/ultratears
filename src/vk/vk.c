@@ -175,7 +175,8 @@ static int pick_device(void) {
     if (best < 0) { LOG("no Vulkan 1.3 GPU with VK_EXT_external_memory_host%s", vkc.surface ? " that presents to the window" : ""); return 0; }
     vk.vkGetPhysicalDeviceProperties(vkc.gpu, &vkc.props);
     vk.vkGetPhysicalDeviceMemoryProperties(vkc.gpu, &vkc.memory);
-    vkc.db = (VkPhysicalDeviceDescriptorBufferPropertiesEXT){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT};
+    vkc.so = (VkPhysicalDeviceShaderObjectPropertiesEXT){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_PROPERTIES_EXT};
+    vkc.db = (VkPhysicalDeviceDescriptorBufferPropertiesEXT){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT, &vkc.so};
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT host = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT, &vkc.db};
     VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host};
     vk.vkGetPhysicalDeviceProperties2(vkc.gpu, &p2);
@@ -241,11 +242,11 @@ static int create_device(void) {
         {VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME, &ffld, &has_fld},
         // ...and a draw that samples a target earlier draws of the pass wrote waits for them inside the pass
         {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME, &flr, &has_lr},
+        {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, NULL, &vkc.has_memory_budget},   // the memory log line
         // development (TOTK_VK_CHECKPOINTS=1): the markers a lost device reached
         {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, NULL, &vkc.has_checkpoints},
-        {VK_AMD_BUFFER_MARKER_EXTENSION_NAME, NULL, &vkc.has_markers},
-        // the overlay's video memory figures
-        {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, NULL, &vkc.has_memory_budget},
+        // ...and written by the GPU to host memory, which outlives the device (the NVIDIA driver gave 0 checkpoints, 2026-10-27)
+        {VK_AMD_BUFFER_MARKER_EXTENSION_NAME, NULL, &vkc.has_buffer_marker},
         // a lost device's fault: address and kind (no cost while nothing faults)
         {VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &ffault, &vkc.has_fault},
 #ifdef __APPLE__
@@ -255,7 +256,7 @@ static int create_device(void) {
     };
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) {
         if (!strcmp(want[i].name, VK_KHR_SWAPCHAIN_EXTENSION_NAME) && !vkc.surface) continue;
-        if ((want[i].flag == &vkc.has_checkpoints || want[i].flag == &vkc.has_markers) && !getenv("TOTK_VK_CHECKPOINTS")) continue;
+        if ((want[i].flag == &vkc.has_checkpoints || want[i].flag == &vkc.has_buffer_marker) && !getenv("TOTK_VK_CHECKPOINTS")) continue;
         if (!ext_in(&ex, want[i].name)) { LOG("extension %s not available", want[i].name); continue; }
         names[nnames++] = want[i].name;
         if (want[i].flag) *want[i].flag = 1;

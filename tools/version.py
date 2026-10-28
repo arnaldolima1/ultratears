@@ -17,7 +17,7 @@ TAG = re.compile(r'^v(\d+\.\d+\.\d+)$')
 def _git(*args):
     try:
         r = subprocess.run(['git', '-C', str(ROOT)] + list(args), capture_output=True, text=True)
-    except OSError:   # no git on this PC
+    except OSError:   # git not installed (a builder package without VERSION.txt): no version from git
         return None
     return r.stdout.strip() if r.returncode == 0 else None
 

@@ -934,8 +934,8 @@ static void tab_shaders(float s) {
             ImGui::Text(fmt, v, v2);
         };
         row(L("Prontos nesta sessão", "Ready this session"), "%llu%.0llu", (unsigned long long)loaded, 0ull);
-        row(L("Feitos em segundo plano", "Made in the background"), "%llu%.0llu", (unsigned long long)made, 0ull);
-        if (total && left >= 0) row(L("Pré-compilados na abertura", "Made ahead at start"), "%llu / %llu", (unsigned long long)done, (unsigned long long)total);
+        row(L("Feitos antes do primeiro uso", "Made before first use"), "%llu%.0llu", (unsigned long long)made, 0ull);
+        if (total && left >= 0) row(L("Compilados para este driver", "Compiled for this driver"), "%llu / %llu", (unsigned long long)done, (unsigned long long)total);
         if (missing) row(L("Sem tradução", "Without translation"), "%llu%.0llu", (unsigned long long)missing, 0ull);
         ImGui::EndTable();
     }
@@ -944,10 +944,12 @@ static void tab_shaders(float s) {
     ImGui::Spacing();
     stagger(3, s);
     ImGui::PushTextWrapPos(0);
-    hint(L("Shaders novos são compilados em segundo plano: um objeto pode aparecer um instante depois, mas o jogo não "
-           "trava. Todos ficam anotados e, na próxima vez que você abrir o jogo, já vêm prontos.",
-           "New shaders are compiled in the background: an object may show up a moment later, but the game does not "
-           "freeze. They are all noted down and come ready the next time you start the game."));
+    hint(L("Os shaders de cada lugar são preparados em segundo plano assim que o jogo os carrega, antes de aparecerem. "
+           "Todos os shaders do jogo são compilados uma vez para o seu driver e guardados em disco: depois disso "
+           "vêm prontos em ~1 ms cada.",
+           "Each place's shaders are made in the background as soon as the game loads them, before they show up. All "
+           "of the game's shaders are compiled once for your driver and kept on disk: after that they come ready in "
+           "~1 ms each."));
     ImGui::PopTextWrapPos();
     ImGui::PopStyleVar();
 }

@@ -67,7 +67,7 @@ def say(msg):
 def is_checkout():
     try:
         r = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
-    except OSError:   # no git on this PC: a builder package
+    except OSError:   # git not installed: a builder package, not a checkout
         return False
     return r.returncode == 0 and pathlib.Path(r.stdout.strip()).resolve() == ROOT
 
@@ -287,6 +287,12 @@ def choose_dump(home, requested):
     for candidate in (home / 'game', ROOT / 'game'):
         if (candidate / 'exefs').is_dir() or (candidate / 'romfs').is_dir():
             return candidate.resolve()
+    try:   # the dump an earlier --dump gave for this output folder
+        remembered = json.loads((home / 'data/setup.json').read_text()).get('dump')
+    except (OSError, ValueError):
+        remembered = None
+    if remembered and pathlib.Path(remembered).is_dir():
+        return pathlib.Path(remembered)
     return (home / 'game').resolve()
 
 
@@ -479,7 +485,8 @@ def step_textures(dump, state, cpus):
 def step_finish(dump, state, cpus):
     fonts = dump / 'sysdata/fonts'
     lines = ['# Written by tools/setup.py: where UltraTears finds its data (relative to this folder).',
-             'exefs=data/exefs', 'romfs=data/romfs', 'shaders=data/shaders/ryujinx', 'textures=data/textures',
+             'exefs=data/exefs', 'romfs=data/romfs', 'shaders=data/shaders/ryujinx', 'compiled=data/shaders/compiled.bin',
+             'textures=data/textures',
              'saves=userdata']
     if fonts.is_dir() and list(fonts.glob('*.bfttf')):
         shutil.copytree(fonts, DATA / 'fonts', dirs_exist_ok=True)

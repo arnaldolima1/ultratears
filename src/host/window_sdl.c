@@ -49,7 +49,9 @@ static bool env_on(const char *name) {
 // Start-up screen (with TOTK_START_HIDDEN, i.e. from the launcher): startup.txt in the game folder says where the start
 // is - "starting", "shaders <done> <total>" while the shader list is made ahead (vkb_shader.c), "ready" once the window
 // shows - and the launcher's transition screen reads it. The window stays hidden while the list is made (at most
-// STARTUP_HOLD_S after the first frame): the first draws then find their shaders made instead of stalling.
+// STARTUP_HOLD_S after the first frame): the first draws then find their shaders made instead of stalling. Since the
+// upstream merge of 2026-10-28 there is no such list (shaders follow the game's programs, compiled ahead in the
+// background: vkb_shader.c), vkb_prewarm_progress returns 0 and the window shows at once.
 #define STARTUP_HOLD_S 180
 int vkb_prewarm_progress(uint64_t *done, uint64_t *total);   // gfx/vkb_shader.c
 static void startup_status(const char *text) {
@@ -366,7 +368,9 @@ _Noreturn void window_loop(void) {
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F9) {
-                        vkb_passprof_request();
+                        void vkb_dump_request(void);   // gfx/vkb.h: TOTK_DUMP_KEY=<dir> (development): F9 captures instead
+                        if (getenv("TOTK_DUMP_KEY")) vkb_dump_request();
+                        else vkb_passprof_request();
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {

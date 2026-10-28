@@ -10,12 +10,11 @@
 
 #define VK_FN_GLOBAL(X) X(vkCreateInstance) X(vkEnumerateInstanceLayerProperties) X(vkEnumerateInstanceExtensionProperties)
 #define VK_FN_INSTANCE(X) X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) \
-    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceMemoryProperties2)\
     X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceFormatProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkEnumerateDeviceExtensionProperties) X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkDestroySurfaceKHR) \
-    X(vkGetPhysicalDeviceMemoryProperties2)
+    X(vkEnumerateDeviceExtensionProperties) X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkDestroySurfaceKHR)
 #define VK_FN_DEVICE(X) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) X(vkQueueSubmit) X(vkQueueSubmit2) X(vkQueueWaitIdle) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) \
     X(vkCreateCommandPool) X(vkResetCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) \
@@ -30,7 +29,7 @@
     X(vkCmdClearDepthStencilImage) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCreateDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkCreateDescriptorPool) X(vkResetDescriptorPool) \
     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) \
-    X(vkCreateShadersEXT) X(vkDestroyShaderEXT) X(vkCmdBindShadersEXT) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDispatch) \
+    X(vkCreateShadersEXT) X(vkDestroyShaderEXT) X(vkGetShaderBinaryDataEXT) X(vkCmdBindShadersEXT) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDispatch) \
     X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) X(vkCmdSetVertexInputEXT) X(vkCmdSetViewportWithCount) \
     X(vkCmdSetScissorWithCount) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetRasterizerDiscardEnable) \
     X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPolygonModeEXT) X(vkCmdSetDepthBiasEnable) X(vkCmdSetDepthBias) \
@@ -42,9 +41,9 @@
     X(vkCmdSetLineWidth) X(vkCmdSetDepthClipNegativeOneToOneEXT) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetProvokingVertexModeEXT) X(vkCmdSetDepthClipEnableEXT) X(vkCmdSetDepthBounds) \
     X(vkCreateQueryPool) X(vkResetQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp2) X(vkGetQueryPoolResults) \
-    X(vkCmdSetAttachmentFeedbackLoopEnableEXT) X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV) \
+    X(vkCmdSetAttachmentFeedbackLoopEnableEXT) X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV) X(vkCmdWriteBufferMarkerAMD) X(vkInvalidateMappedMemoryRanges) \
     X(vkGetDescriptorSetLayoutSizeEXT) X(vkGetDescriptorSetLayoutBindingOffsetEXT) X(vkGetDescriptorEXT) \
-    X(vkCmdBindDescriptorBuffersEXT) X(vkCmdSetDescriptorBufferOffsetsEXT) X(vkCmdPushConstants) X(vkDestroyDescriptorPool) X(vkCmdWriteBufferMarkerAMD) X(vkGetDeviceFaultInfoEXT)
+    X(vkCmdBindDescriptorBuffersEXT) X(vkCmdSetDescriptorBufferOffsetsEXT) X(vkCmdPushConstants) X(vkDestroyDescriptorPool) X(vkGetDeviceFaultInfoEXT)
 #define VK_FN_DECLARE(f) PFN_##f f;
 typedef struct { VK_FN_GLOBAL(VK_FN_DECLARE) VK_FN_INSTANCE(VK_FN_DECLARE) VK_FN_DEVICE(VK_FN_DECLARE) } VkFunctions;
 #undef VK_FN_DECLARE
@@ -66,10 +65,11 @@ typedef struct {
     int fb_color;            // colour targets too (else only depth is sampled while bound)
     int has_local_read;      // VK_KHR_dynamic_rendering_local_read: barriers inside a pass (draws reading what earlier draws wrote)
     VkPhysicalDeviceDescriptorBufferPropertiesEXT db;   // VK_EXT_descriptor_buffer: descriptor sizes, alignment, ranges
+    VkPhysicalDeviceShaderObjectPropertiesEXT so;      // VK_EXT_shader_object: the driver's shader binary format (UUID, version)
     int has_checkpoints;     // TOTK_VK_CHECKPOINTS=1: VK_NV_device_diagnostic_checkpoints (where a lost device stopped)
-    int has_markers;         // TOTK_VK_CHECKPOINTS=1 without the NV extension: VK_AMD_buffer_marker (the same, on AMD)
+    int has_buffer_marker;   // TOTK_VK_CHECKPOINTS=1: VK_AMD_buffer_marker (the same, written by the GPU to host memory)
     int has_fault;           // VK_EXT_device_fault: what a lost device faulted on (vk_fault_report)
-    int has_memory_budget;   // VK_EXT_memory_budget: video memory in use / available (the overlay, overlay.cpp)
+    int has_memory_budget;   // VK_EXT_memory_budget: the memory this process uses per heap (the memory log line, the overlay)
 } VkContext;
 extern VkContext vkc;
 

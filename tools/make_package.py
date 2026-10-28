@@ -1,6 +1,6 @@
 """Make the builder package for a release: dist/UltraTears-builder-<version>-windows-x86_64.zip.
 
-usage: python tools/make_package.py [--home ../release-test] [--python <Python 3.14>] [--no-zip]
+usage: python tools/make_package.py [--home dist] [--python <Python 3.14>] [--no-zip]
 The version is the tag v<x.y.z> on HEAD (tools/version.py): tag the release commit first.
 Run on the developer's machine after a complete build in the game folder --home (tools/setup.py --output: its build/build.ninja
 and objects tell which parts of clang64 the build reads) and tools/build_xlate.py (dev-local/build/shaders):
@@ -181,7 +181,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--python', type=pathlib.Path, default=pathlib.Path(sys.base_prefix))
     ap.add_argument('--no-zip', action='store_true')
-    ap.add_argument('--home', type=pathlib.Path, default=ROOT.parent / 'release-test')
+    ap.add_argument('--home', type=pathlib.Path, default=ROOT / 'dist')   # tools/setup.py's default output
     a = ap.parse_args()
     if git('status', '--porcelain', '--untracked-files=no').strip():
         sys.exit('the working tree has uncommitted changes: commit first, the package must be the commit it names')
