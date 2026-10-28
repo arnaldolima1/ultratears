@@ -50,6 +50,7 @@ static int block_new(VkDeviceSize size) {
             !(vkc.memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) type = i;
     VkMemoryAllocateFlagsInfo fl = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fl, .allocationSize = req.size, .memoryTypeIndex = type};
+    vkb_mtag = MT_POOL_COPY;
     if (type == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &b.mem) != VK_SUCCESS) {
         vk.vkDestroyBuffer(vkc.device, b.buf, NULL);
         VLOG("shadow memory: no %llu MiB of device memory", (unsigned long long)(size >> 20));

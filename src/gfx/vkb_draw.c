@@ -52,6 +52,7 @@ static int chunk_new(chunk_t *c, VkDeviceSize size) {
     }
     VkMemoryAllocateFlagsInfo fl = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};   // descriptor buffers
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fl, .allocationSize = req.size, .memoryTypeIndex = g_ring_type};
+    vkb_mtag = MT_RING;
     if (!vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &c->mem), "upload memory")) return 0;
     vk.vkBindBufferMemory(vkc.device, c->buf, c->mem, 0);
     void *m;
@@ -546,6 +547,7 @@ static int mirror_alloc(uint64_t addr, VkDeviceSize n, VkBuffer *buf, VkDeviceSi
         VkMemoryAllocateFlagsInfo fl = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fl, .allocationSize = req.size,
                                    .memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+        vkb_mtag = MT_MIRROR;
         if (ai.memoryTypeIndex == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &g_mpool[sl].mem), "mirror memory")) die("mirror memory");
         vk.vkBindBufferMemory(vkc.device, g_mpool[sl].buf, g_mpool[sl].mem, 0);
     }

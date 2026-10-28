@@ -39,6 +39,9 @@ int vkb_in_pass(void);
 // Host-visible upload memory of the current submission (reused after its fence): n bytes aligned to `align`.
 void *vkb_ring_alloc(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDeviceSize *off);
 void vkb_ring_stats(uint64_t *chunks, uint64_t *bytes, uint64_t *pairs);   // upload memory now: chunks, bytes, slot x thread pairs
+// What the next vkAllocateMemory of this thread is for (the memory log counts by it; reset by the allocation).
+enum { MT_OTHER, MT_IMAGE, MT_RING, MT_DESC, MT_POOL_COPY, MT_MIRROR, MT_UCAP, MT_WRITEBACK, MT_COPY_BACK, MT_N };
+extern __thread int vkb_mtag;
 VkCommandBuffer vkb_cmd(void);    // the command buffer of the submission being replayed
 int vkb_render_suppressed(void);   // rendering disabled or conditional (recorded state; audit)
 int vkb_ready(void);              // 1 when replaying on a Vulkan device

@@ -256,6 +256,7 @@ static int create(vkb_image *im, const tex_t *t) {
     // [temporary] one allocation per texture; a suballocator before the open world (thousands of textures)
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
                                .memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+    vkb_mtag = MT_IMAGE;
     if (ai.memoryTypeIndex == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &im->mem), "image memory")) {
         vk.vkDestroyImage(vkc.device, im->img, NULL);
         return 0;
@@ -807,6 +808,7 @@ static int to_bc7(vkb_image *im, int srgb, int fmt) {
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
                                .memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
     VkDeviceMemory mem;
+    vkb_mtag = MT_IMAGE;
     if (ai.memoryTypeIndex == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &mem) != VK_SUCCESS) { vk.vkDestroyImage(vkc.device, img, NULL); return 0; }
     vk.vkBindImageMemory(vkc.device, img, mem, 0);
     vkb_destroy_later(VK_NULL_HANDLE, im->img, im->mem);   // the RGBA8 image no command has used
@@ -1514,6 +1516,7 @@ static int wb_arena(void) {
     if (type == UINT32_MAX) type = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
     void *m;
+    vkb_mtag = MT_WRITEBACK;
     if (type == UINT32_MAX || vk.vkAllocateMemory(vkc.device, &ai, NULL, &g_wb_mem) != VK_SUCCESS) { vk.vkDestroyBuffer(vkc.device, g_wb_buf, NULL); return 0; }
     vk.vkBindBufferMemory(vkc.device, g_wb_buf, g_wb_mem, 0);
     if (vk.vkMapMemory(vkc.device, g_wb_mem, 0, VK_WHOLE_SIZE, 0, &m) != VK_SUCCESS) return 0;

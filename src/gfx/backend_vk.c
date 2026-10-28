@@ -104,13 +104,19 @@ static PFN_vkAllocateMemory g_real_alloc;
 static PFN_vkFreeMemory g_real_free;
 static _Atomic uint64_t g_mem_bytes[MK_N], g_mem_peak[MK_N], g_mem_count[MK_N];
 enum { MEMTAB = 1 << 16 };
-static struct { uint64_t mem, size; int kind; } *g_memtab;   // open addressing by handle; mem 0 free, 1 removed
+static struct { uint64_t mem, size; int kind, tag; } *g_memtab;   // open addressing by handle; mem 0 free, 1 removed
+__thread int vkb_mtag;
+static _Atomic uint64_t g_tag_bytes[MT_N];
 static pthread_mutex_t g_memtab_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkResult VKAPI_CALL count_alloc(VkDevice d, const VkMemoryAllocateInfo *ai, const VkAllocationCallbacks *a, VkDeviceMemory *m) {
     VkResult r = g_real_alloc(d, ai, a, m);
+    int tag = vkb_mtag;
+    vkb_mtag = MT_OTHER;
     if (r != VK_SUCCESS) return r;
     int kind = MK_HOST;
     for (const VkBaseInStructure *p = ai->pNext; p; p = p->pNext) if (p->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) kind = MK_IMPORT;
+    if (kind == MK_IMPORT) tag = -1;   // game memory, not ours
+    else atomic_fetch_add(&g_tag_bytes[tag], ai->allocationSize);
     if (kind != MK_IMPORT && ai->memoryTypeIndex < vkc.memory.memoryTypeCount &&
         (vkc.memory.memoryHeaps[vkc.memory.memoryTypes[ai->memoryTypeIndex].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) kind = MK_DEVICE;
     uint64_t n = atomic_fetch_add(&g_mem_bytes[kind], ai->allocationSize) + ai->allocationSize, pk = atomic_load(&g_mem_peak[kind]);
@@ -120,7 +126,7 @@ static VkResult VKAPI_CALL count_alloc(VkDevice d, const VkMemoryAllocateInfo *a
     if (!g_memtab && !(g_memtab = calloc(MEMTAB, sizeof *g_memtab))) die("memory table");
     uint64_t h = (uint64_t)(uintptr_t)*m;
     for (uint32_t i = (uint32_t)(h * 0x9E3779B97F4A7C15ull >> 48), k = 0; k < MEMTAB; i = (i + 1) & (MEMTAB - 1), k++)
-        if (g_memtab[i].mem <= 1) { g_memtab[i].mem = h; g_memtab[i].size = ai->allocationSize; g_memtab[i].kind = kind; break; }
+        if (g_memtab[i].mem <= 1) { g_memtab[i].mem = h; g_memtab[i].size = ai->allocationSize; g_memtab[i].kind = kind; g_memtab[i].tag = tag; break; }
     pthread_mutex_unlock(&g_memtab_mu);
     return r;
 }
@@ -132,6 +138,7 @@ static void VKAPI_CALL count_free(VkDevice d, VkDeviceMemory m, const VkAllocati
             if (g_memtab[i].mem == h) {
                 atomic_fetch_sub(&g_mem_bytes[g_memtab[i].kind], g_memtab[i].size);
                 atomic_fetch_sub(&g_mem_count[g_memtab[i].kind], 1);
+                if (g_memtab[i].tag >= 0) atomic_fetch_sub(&g_tag_bytes[g_memtab[i].tag], g_memtab[i].size);
                 g_memtab[i].mem = 1;
                 break;
             }
@@ -168,6 +175,13 @@ static void memory_log(void) {
         vkb_ring_stats(&rc, &rb, &rp);
         VLOG("memory: upload rings %.0f MiB in %llu chunks over %llu slot x thread pairs", rb / 1048576.0, (unsigned long long)rc,
              (unsigned long long)rp);
+        static const char *const tn[MT_N] = {"other", "images", "upload rings", "descriptors", "pool copies", "mirrors",
+                                             "uniform copies", "write-back", "copy back"};
+        char tl[384];
+        int at = 0;
+        for (int t = 0; t < MT_N; t++)
+            at += snprintf(tl + at, sizeof tl - (size_t)at, " %s %.0f;", tn[t], atomic_load(&g_tag_bytes[t]) / 1048576.0);
+        VLOG("memory: ours by use (MiB):%s", tl);
     }
 }
 
@@ -476,6 +490,7 @@ static uint8_t *bf_map(int slot, VkBuffer *buf) {
             }
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
         void *m;
+        vkb_mtag = MT_COPY_BACK;
         if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &b->mem), "copy back before-memory")) {
             vk.vkDestroyBuffer(vkc.device, b->buf, NULL); b->buf = VK_NULL_HANDLE; return NULL;
         }
@@ -582,6 +597,7 @@ static uint8_t *wbst_get(int slot, VkDeviceSize need, VkBuffer *buf) {   // the 
                 if ((req.memoryTypeBits & (1u << i)) && (f & want) == want && (pass || (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))) type = i;
             }
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+        vkb_mtag = MT_COPY_BACK;
         if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &s->mem), "copy back memory")) die("copy back memory");
         vk.vkBindBufferMemory(vkc.device, s->buf, s->mem, 0);
         void *p;
