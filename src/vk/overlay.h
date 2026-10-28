@@ -22,7 +22,7 @@ enum { OVL_COUNTER_OFF, OVL_COUNTER_FPS, OVL_COUNTER_FULL, OVL_COUNTERS };
 enum { OVL_ACT_FPS60 = 1, OVL_ACT_FULLSCREEN = 2, OVL_ACT_CLOSE = 4 };   // the panel asked: toggle / toggle / close it
 
 // main thread
-void ovl_settings_load(void);                  // userdata/overlay.cfg (counter, corner); TOTK_FPS_OVERLAY=1 starts with the counter
+void ovl_settings_load(void);                  // userdata/overlay.cfg (counter, corner, notice); TOTK_FPS_OVERLAY=1: the detailed counter
 void ovl_stats_set(const ovl_stats *s);
 void ovl_flags_set(int fps60, int fullscreen); // what the options show
 int ovl_panel(void);
@@ -36,6 +36,7 @@ unsigned ovl_take_actions(void);               // OVL_ACT_* asked since the last
 // present thread
 void ovl_frame_time(double ms);                // the time since the previous game frame shown
 int ovl_visible(void);                         // something to draw
+int ovl_repaint(void);                         // the panel is open or moving: show the last frame again at the display's pace
 // Draws into the swapchain image (in COLOR_ATTACHMENT_OPTIMAL) through `view`; `picture` is where the game's picture
 // is in it; `slot` is the frame in flight (0 or 1: its buffers are free again once that slot's fence was waited on).
 void ovl_draw(VkCommandBuffer cb, VkImageView view, VkExtent2D extent, VkRect2D picture, unsigned slot);

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define LOG(...) (fprintf(stderr, "[totk-vk] " __VA_ARGS__), fputc('\n', stderr))
 #define FRAMES 2          // frames in flight
@@ -203,7 +204,7 @@ void vkp_out_ready(int slot, VkSemaphore timeline, uint64_t value, const int cro
 }
 
 // One window frame: the newest game frame (out, may be NULL: the cycling colour) fitted with its aspect ratio.
-static int present_one(uint64_t n, unsigned slot, out_t *out) {
+static int present_one(uint64_t n, unsigned slot, out_t *out, int repaint) {
     if (atomic_exchange(&resized, 0) || !swapchain) {
         vk.vkWaitForFences(vkc.device, FRAMES, in_flight, VK_TRUE, UINT64_MAX);   // the present thread's own work only
         destroy_swapchain();
@@ -275,6 +276,7 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) atomic_store(&resized, 1);
     else if (r != VK_SUCCESS) { vk_check(r, "vkQueuePresentKHR"); return 0; }
     if (out) vk.vkWaitForFences(vkc.device, 1, &in_flight[slot], VK_TRUE, UINT64_MAX);   // the output image is free again after this
+    if (repaint) return 1;   // the same game frame again (overlay animation): not counted
     atomic_fetch_add(&presented, 1);
     if (out) {
         atomic_fetch_add(&game_shown, 1);
@@ -288,28 +290,39 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
     return 1;
 }
 
+// While the overlay's panel is open or moving (ovl_repaint) the last game frame is shown again every REPAINT_MS, so the
+// panel moves at the display's pace rather than the game's; that frame stays held (state 2) until a newer one comes.
+#define REPAINT_MS 12
 static void *present_thread(void *unused) {
     (void)unused;
     uint64_t shown = 0;
     unsigned slot = 0;
+    int held = -1;
     for (;;) {
         pthread_mutex_lock(&mu);
-        while (frames_in == shown) pthread_cond_wait(&cv, &mu);
-        shown = frames_in;   // frames that came while the last one was shown are skipped: only the newest counts
-        int pick = -1;
-        for (int i = 0; i < OUTS; i++) if (g_out[i].state == 1 && (pick < 0 || g_out[i].seq > g_out[pick].seq)) pick = i;
-        if (pick >= 0) g_out[pick].state = 2;
-        pthread_mutex_unlock(&mu);
-        if (present_one(shown, slot, pick >= 0 ? &g_out[pick] : NULL)) slot = (slot + 1) % FRAMES;
-        if (pick >= 0) {
-            pthread_mutex_lock(&mu);
-            g_out[pick].state = 0;
-            pthread_mutex_unlock(&mu);
+        int repaint = 0;
+        while (frames_in == shown) {
+            if (held < 0 || !ovl_repaint()) { pthread_cond_wait(&cv, &mu); continue; }
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += REPAINT_MS * 1000000L;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            if (pthread_cond_timedwait(&cv, &mu, &ts) && frames_in == shown) { repaint = 1; break; }
         }
+        int pick = held;
+        if (!repaint) {
+            shown = frames_in;   // frames that came while the last one was shown are skipped: only the newest counts
+            pick = -1;
+            for (int i = 0; i < OUTS; i++) if (g_out[i].state == 1 && (pick < 0 || g_out[i].seq > g_out[pick].seq)) pick = i;
+            if (pick >= 0) g_out[pick].state = 2;
+            if (held >= 0 && held != pick) g_out[held].state = 0;   // the frame shown before is free again
+            held = pick;
+        }
+        pthread_mutex_unlock(&mu);
+        if (present_one(shown, slot, pick >= 0 ? &g_out[pick] : NULL, repaint)) slot = (slot + 1) % FRAMES;
     }
     return NULL;
 }
-
 int vkp_init(SDL_Window *window) {
     g_window = window;
     if (!vk_init(window) || !vkc.surface || !create_present_objects()) return 0;

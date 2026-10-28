@@ -40,7 +40,7 @@ enum { IN_POS, IN_BUTTON, IN_WHEEL };
 static struct { int type; float a, b; } g_in[256];
 static int g_nin;                          // under g_mu
 // set by either thread: read and written with the __atomic builtins (LD / ST)
-static int g_panel, g_counter = OVL_COUNTER_OFF, g_corner, g_fps60, g_fullscreen, g_toast = 1;
+static int g_panel, g_counter = OVL_COUNTER_OFF, g_corner = 1, g_fps60, g_fullscreen, g_toast = 1;   // corner 1: top right, clear of the hearts
 static unsigned g_actions;
 #define LD(v) __atomic_load_n(&(v), __ATOMIC_RELAXED)
 #define ST(v, x) __atomic_store_n(&(v), (x), __ATOMIC_RELAXED)
@@ -50,7 +50,7 @@ static void settings_save() {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
     if (FILE *f = fopen("userdata/overlay.cfg", "w")) {
-        fprintf(f, "counter=%d\ncorner=%d\ntoast=%d\n", LD(g_counter), LD(g_corner), LD(g_toast));
+        fprintf(f, "v=2\ncounter=%d\ncorner=%d\ntoast=%d\n", LD(g_counter), LD(g_corner), LD(g_toast));
         fclose(f);
     }
     pthread_mutex_unlock(&mu);
@@ -59,18 +59,23 @@ static void settings_save() {
 void ovl_settings_load(void) {
     if (FILE *f = fopen("userdata/overlay.cfg", "r")) {
         char line[64];
-        int v;
+        int v, version = 1, counter = -1, corner = -1, toast = -1;
         while (fgets(line, sizeof line, f)) {
-            if (sscanf(line, "counter=%d", &v) == 1 && v >= 0 && v < OVL_COUNTERS) ST(g_counter, v);
-            if (sscanf(line, "corner=%d", &v) == 1 && v >= 0 && v < 4) ST(g_corner, v);
-            if (sscanf(line, "toast=%d", &v) == 1) ST(g_toast, !!v);
+            if (sscanf(line, "v=%d", &v) == 1) version = v;
+            if (sscanf(line, "counter=%d", &v) == 1 && v >= 0 && v < OVL_COUNTERS) counter = v;
+            if (sscanf(line, "corner=%d", &v) == 1 && v >= 0 && v < 4) corner = v;
+            if (sscanf(line, "toast=%d", &v) == 1) toast = !!v;
         }
         fclose(f);
+        if (version >= 2) {   // (version 1 files: the first overlay's defaults, not a choice)
+            if (counter >= 0) ST(g_counter, counter);
+            if (corner >= 0) ST(g_corner, corner);
+        }
+        if (toast >= 0) ST(g_toast, toast);
     }
-    const char *e = getenv("TOTK_FPS_OVERLAY");
-    if (e && *e && strcmp(e, "0") && LD(g_counter) == OVL_COUNTER_OFF) ST(g_counter, OVL_COUNTER_FPS);
+    const char *e = getenv("TOTK_FPS_OVERLAY");   // the launcher's "FPS counter": the detailed one
+    if (e && *e && strcmp(e, "0") && LD(g_counter) == OVL_COUNTER_OFF) ST(g_counter, OVL_COUNTER_FULL);
 }
-
 void ovl_stats_set(const ovl_stats *s) {
     pthread_mutex_lock(&g_mu);
     g_stats = *s;
@@ -81,7 +86,8 @@ void ovl_flags_set(int fps60, int fullscreen) { ST(g_fps60, fps60); ST(g_fullscr
 int ovl_panel(void) { return LD(g_panel); }
 void ovl_panel_set(int on) { ST(g_panel, !!on); }
 void ovl_counter_cycle(void) {
-    ST(g_counter, (LD(g_counter) + 1) % OVL_COUNTERS);
+    static const int next[OVL_COUNTERS] = {OVL_COUNTER_FULL, OVL_COUNTER_OFF, OVL_COUNTER_FPS};   // off, detailed, FPS only
+    ST(g_counter, next[LD(g_counter)]);
     settings_save();
 }
 static void push_input(int type, float a, float b) {
@@ -1099,6 +1105,8 @@ static void draw_panel(float s) {
     hint(L("F1 ou Esc fecha  ·  F2 60 FPS  ·  F3 contador  ·  F11 tela cheia", "F1 or Esc closes  ·  F2 60 FPS  ·  F3 counter  ·  F11 fullscreen"));
     ImGui::End();
 }
+
+int ovl_repaint(void) { return LD(g_panel) || LD(g_anim); }
 
 int ovl_visible(void) {
     return LD(g_panel) || LD(g_anim) || LD(g_counter) != OVL_COUNTER_OFF || LD(g_toast_live) || (LD(g_toast) && vkb_shader_compiling() > 0);
