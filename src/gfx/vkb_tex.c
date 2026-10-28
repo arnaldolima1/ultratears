@@ -387,14 +387,16 @@ int vkb_fb_copy(VkCommandBuffer cb, vkb_image *im) {
     return 1;
 }
 
-// Recording threads look up the same serials draw after draw: a small cache per thread, valid for one submission (no
-// image is freed while a submission is recorded: releases run on the translation thread between submissions).
+// Recording threads look up the same serials draw after draw: a small cache per thread, valid until a texture is
+// released (entries are freed only there; releases run on the translation thread between submissions). Keyed by the
+// submission before, every thread missed on every image once per submission and queued on g_mu for it.
 typedef struct { uint64_t serial, sub; vkb_image *im; } icache_t;
 static __thread icache_t *t_icache;
+static uint64_t g_release_gen = 1;   // bumped under g_mu by vkb_tex_release
 vkb_image *vkb_image_of(const tex_t *t) {
     if (!t || !t->serial || !vkb_ready()) return NULL;
     icache_t *c = NULL;
-    uint64_t sub = mtl_last_fence() + 1;
+    uint64_t sub = __atomic_load_n(&g_release_gen, __ATOMIC_ACQUIRE);
     if (vkb_mt_recording()) {
         if (!t_icache && !(t_icache = calloc(1024, sizeof *t_icache))) die("image cache");
         c = &t_icache[(t->serial * 0x9E3779B97F4A7C15ull) >> 54];
@@ -668,6 +670,7 @@ void vkb_tex_release(const tex_t *t) {
     if (s && s->serial == t->serial && s->e) {
         entry *e = s->e;
         s->e = NULL; g_n--; g_tomb++;
+        __atomic_store_n(&g_release_gen, g_release_gen + 1, __ATOMIC_RELEASE);
         if (--e->refs == 0) {
             if (!e->shaped) entry_drop(e);   // no memory: nothing can take it back
             else {
@@ -690,16 +693,22 @@ void vkb_tex_release(const tex_t *t) {
 // check per texture per submission is enough; a texture found changed is uploaded before its next use (the pass ends
 // for it). Without this, textures the CPU updates while drawn every frame (the font atlas: new glyphs, the save slot
 // thumbnails) kept their first contents.
+// The check's lock: one of a few by image, not g_mu (a check of a large texture held every image lookup behind it).
+static pthread_mutex_t g_stale_mu[16] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
 int vkb_tex_stale(vkb_image *im) {
     uint64_t sub = mtl_last_fence() + 1;
+    pthread_mutex_t *mu = &g_stale_mu[((uintptr_t)im * 0x9E3779B97F4A7C15ull) >> 60];
     if (!im->upload_stamp || im->gpu_written || !im->storage) return 0;
     if (im->cpu_written) return 1;
     if (im->vpool_gen && im->vpool_gen != totk_vpool_generation()) return 1;   // a virtual pool's mapping changed
     if (__atomic_load_n(&im->dirty_checked, __ATOMIC_ACQUIRE) != sub) {
         int mt = vkb_mt_recording();
         if (mt) {   // one thread checks; the others wait for its answer
-            vkb_lock(&g_mu, LK_IMAGES);
-            if (im->dirty_checked == sub) { pthread_mutex_unlock(&g_mu); return im->stale; }
+            vkb_lock(mu, LK_IMAGES);
+            if (im->dirty_checked == sub) { pthread_mutex_unlock(mu); return im->stale; }
         }
         nvn_texlayout L;
         nvn_tex_layout(&im->d, &L);
@@ -714,7 +723,7 @@ int vkb_tex_stale(vkb_image *im) {
                  (unsigned long long)sub, nvn_dirty_tracked(im->storage, L.size), im->stale, (unsigned long long)im->upload_stamp,
                  (unsigned long long)nvn_dirty_now());
         __atomic_store_n(&im->dirty_checked, sub, __ATOMIC_RELEASE);
-        if (mt) pthread_mutex_unlock(&g_mu);
+        if (mt) pthread_mutex_unlock(mu);
     }
     return im->stale;
 }
