@@ -1687,8 +1687,9 @@ static int exec_ops(const uint8_t *p, int depth, int mode, int hidx, const mt_ch
 // Threads recording (vkb_mt_submit): the submission's command buffers after the slot's own, the last one for the work at
 // its end (copies back, the GPU end time).
 enum { MT_MAXCH = 96 };
-static VkCommandBuffer g_mt_list[2 * MT_MAXCH + 2];
+static VkCommandBuffer g_mt_list[3 * MT_MAXCH + 4];
 static int g_mt_nlist;
+static int g_slot_sent;   // progressive submission (vkb_mt_send): the slot's command buffer went to the GPU already
 uint64_t mtl_sub_commit(void) {
     uint64_t fence = ++g_fence;
     post_op *ops = NULL;
@@ -1709,11 +1710,12 @@ uint64_t mtl_sub_commit(void) {
     gpu_time_end(g_cur, last);
     cmd_slot *s = &g_slots[g_cur];
     s->fence = fence;
-    vk.vkEndCommandBuffer(s->cb);
+    if (!g_slot_sent) vk.vkEndCommandBuffer(s->cb);
     if (g_mt_nlist) vk.vkEndCommandBuffer(last);
-    VkCommandBufferSubmitInfo cbi[2 * MT_MAXCH + 3];
+    VkCommandBufferSubmitInfo cbi[3 * MT_MAXCH + 5];
     int ncbi = 0;
-    cbi[ncbi++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->cb};
+    if (!g_slot_sent) cbi[ncbi++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->cb};
+    g_slot_sent = 0;
     for (int i = 0; i < g_mt_nlist; i++)
         cbi[ncbi++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = g_mt_list[i]};
     VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_timeline, .value = fence,
@@ -1770,6 +1772,8 @@ struct mt_chunk {
     void *state; p_set_rt rt; int render_off; int64_t stride;   // the state it starts in
     VkCommandBuffer cb;
     vkb_trk trk;
+    uint64_t draws, ns;                   // draws cut into it, its recording time (the log line)
+    int done;                             // recorded (g_mt_mu)
 };
 static mt_chunk g_ch[MT_MAXCH];
 static int g_nch;
@@ -1786,13 +1790,15 @@ static int64_t g_walk_stride;
 // the prologue: any recording thread, one at a time
 static pthread_mutex_t g_pro_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkCommandBuffer g_pro_cb;
-static vkb_trk g_pro_trk;
+static vkb_trk g_pro_trks[2], *g_pro_trk = &g_pro_trks[0];   // two: a progressive send moves on to the other
 static __thread VkCommandBuffer t_pro_cb;
 static __thread vkb_trk *t_pro_trk;
 static __thread int t_pro_depth;
-// command buffers per slot and recording thread; [VKB_MAXREC]: the prologue's, the moves' and the end's
+// command buffers per slot and recording thread; [WP_PRO]: the prologue's (g_pro_mu), [WP_GLUE]: the moves' and the
+// end's (g_send_mu)
+enum { WP_PRO = VKB_MAXREC, WP_GLUE = VKB_MAXREC + 1 };
 typedef struct { VkCommandPool pool; VkCommandBuffer *cb; int n, used; } wpool_t;
-static wpool_t g_wp[SLOTS][VKB_MAXREC + 1];
+static wpool_t g_wp[SLOTS][VKB_MAXREC + 2];
 
 int vkb_mt_on(void) {
     static int n = -1;
@@ -1844,7 +1850,7 @@ static VkCommandBuffer wp_get(int slot, int w) {   // a command buffer of that t
     return cb;
 }
 void vkb_mt_slot_reset(int slot) {   // the slot's previous submission has completed (no thread is recording)
-    for (int w = 0; w <= VKB_MAXREC; w++)
+    for (int w = 0; w <= WP_GLUE; w++)
         if (g_wp[slot][w].used) { vk.vkResetCommandPool(vkc.device, g_wp[slot][w].pool, 0); g_wp[slot][w].used = 0; }
 }
 
@@ -1853,7 +1859,7 @@ void vkb_pro_begin(void) {
     pthread_mutex_lock(&g_pro_mu);
     t_pro_cb = t_cb; t_pro_trk = vkb_trk_get();
     t_cb = g_pro_cb;
-    vkb_trk_set(&g_pro_trk);
+    vkb_trk_set(g_pro_trk);
 }
 void vkb_pro_end(void) {
     if (!t_recording || --t_pro_depth) return;
@@ -1888,7 +1894,8 @@ static void mt_record(mt_chunk *c) {
     vkb_trk_set(NULL);
     t_recording = 0;
     t_cb = VK_NULL_HANDLE;
-    vkb_cnt_add(g_mt_rec_ns, runtime_now_ns() - t0);
+    c->ns = runtime_now_ns() - t0;
+    vkb_cnt_add(g_mt_rec_ns, c->ns);
 }
 static int mt_take(void) {   // the next chunk cut and not taken, or -1
     pthread_mutex_lock(&g_mt_mu);
@@ -1896,7 +1903,13 @@ static int mt_take(void) {   // the next chunk cut and not taken, or -1
     pthread_mutex_unlock(&g_mt_mu);
     return k;
 }
-static void mt_recorded(void) {
+static void mt_send(int final);
+static int mt_progressive(void);
+static void mt_recorded(int k) {   // chunk k is recorded: sent on if it is next (before it counts as done: then no thread sends any more)
+    pthread_mutex_lock(&g_mt_mu);
+    g_ch[k].done = 1;
+    pthread_mutex_unlock(&g_mt_mu);
+    if (mt_progressive()) mt_send(0);
     pthread_mutex_lock(&g_mt_mu);
     g_mt_done++;
     pthread_cond_broadcast(&g_mt_done_cv);
@@ -1914,7 +1927,7 @@ static void *mt_thread(void *arg) {
         int k = g_mt_next++;
         pthread_mutex_unlock(&g_mt_mu);
         mt_record(&g_ch[k]);
-        mt_recorded();
+        mt_recorded(k);
     }
     return NULL;
 }
@@ -1922,7 +1935,7 @@ static void *mt_thread(void *arg) {
 // ---- the walk
 static void chunk_open(int hidx, const uint8_t *p) {   // a chunk starts at p, in the state the walk is in now
     mt_chunk *c = &g_ch[g_nch];
-    c->h0 = hidx; c->p0 = p; c->seq = t_seq;
+    c->h0 = hidx; c->p0 = p; c->seq = t_seq; c->done = 0;
     if (!c->state && !(c->state = malloc(vkb_state_size()))) die("chunk state");
     vkb_state_save(c->state);
     c->rt = g_rt;
@@ -1932,16 +1945,27 @@ static void chunk_open(int hidx, const uint8_t *p) {   // a chunk starts at p, i
 }
 static void chunk_close(int hidx, const uint8_t *p) {   // the open chunk ends before p: recording threads may take it
     mt_chunk *c = &g_ch[g_nch];
-    c->h1 = hidx; c->p1 = p;
+    c->h1 = hidx; c->p1 = p; c->draws = g_mt_draws;
     pthread_mutex_lock(&g_mt_mu);
     g_mt_avail = ++g_nch;
     pthread_cond_broadcast(&g_mt_cv);
     pthread_mutex_unlock(&g_mt_mu);
 }
+// A pass of the Great Sky Island holds over half of a submission's draws (2026-10-28: 2264 of 4249, 85 % of the
+// recording's wall time), so a chunk is also cut inside a pass, before a draw, once it has TOTK_VK_PASS_CUT draws
+// (default 600, 0: only at render target changes). The next chunk begins the pass again with load and store, as
+// after a uniform update; on a GPU that renders immediately (not in tiles) that costs little.
+static uint64_t pass_cut(void) {
+    static long long n = -1;
+    if (n < 0) { const char *e = getenv("TOTK_VK_PASS_CUT"); n = e && *e ? atoll(e) : 600; if (n < 0) n = 0; VLOG("chunks cut inside a pass after %lld draws%s", n, n ? "" : " (off)"); }
+    return (uint64_t)n;
+}
 static int walk_op(const uint8_t *p, int hidx) {   // before a command at depth 0: a new chunk at a render target change
     op_hdr h;
     memcpy(&h, p, sizeof h);
-    if (h.op == OP_SET_RT && g_mt_draws >= MT_DRAWS && g_nch < MT_MAXCH - 1) {
+    uint64_t cut = pass_cut();
+    if (((h.op == OP_SET_RT && g_mt_draws >= MT_DRAWS) || (cut && (h.op == OP_DRAW || h.op == OP_DRAW_IDX) && g_mt_draws >= cut)) &&
+        g_nch < MT_MAXCH - 1) {
         chunk_close(hidx, p);
         chunk_open(hidx, p);
     }
@@ -2009,9 +2033,76 @@ static void glue(VkCommandBuffer cb, vkb_trk *t) {
     for (int k = 0; k < t->n; k++) t->e[k].im->layout = t->e[k].cur;
 }
 
+// Progressive submission (TOTK_VK_PROGRESSIVE=0: off): the chunks recorded so far, in order, go to the GPU while threads
+// record the rest. The game waits for a submission's GPU work each frame, and recording (~8 ms) and the GPU (~11 ms)
+// ran one after the other (2026-10-28). The prologue is cut into segments for it: what threads add to it after a segment
+// is sent goes into the next one, which is sent before the chunks after it (a chunk is sent only once it is recorded,
+// so whatever it added is in a segment before it). Any recording thread sends, one at a time (g_send_mu).
+static pthread_mutex_t g_send_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_glue_images;   // images moved between chunks (the log line)
+static int g_mt_sent;            // chunks of this submission in g_mt_list or sent
+static uint64_t g_mt_sends;      // submits before the last one (the log line)
+static int mt_progressive(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TOTK_VK_PROGRESSIVE"); v = !(e && *e == '0'); VLOG("progressive submission: %s", v ? "on" : "off (TOTK_VK_PROGRESSIVE=0)"); }
+    return v;
+}
+static void mt_send(int final) {   // appends the prologue segment and the chunks recorded in order to g_mt_list; not final: submits them
+    pthread_mutex_lock(&g_send_mu);
+    pthread_mutex_lock(&g_mt_mu);
+    int upto = g_mt_sent;
+    while (upto < g_nch && g_ch[upto].done) upto++;
+    pthread_mutex_unlock(&g_mt_mu);
+    if (!final && upto == g_mt_sent) { pthread_mutex_unlock(&g_send_mu); return; }
+    pthread_mutex_lock(&g_pro_mu);
+    VkCommandBuffer pro = g_pro_cb;
+    vkb_trk *pt = g_pro_trk;
+    vk.vkEndCommandBuffer(pro);   // here: threads record the next segment from the same pool
+    if (!final) {
+        g_pro_trk = pt == &g_pro_trks[0] ? &g_pro_trks[1] : &g_pro_trks[0];
+        vkb_trk_reset(g_pro_trk);
+        g_pro_cb = wp_get(g_cur, WP_PRO);
+    }
+    pthread_mutex_unlock(&g_pro_mu);
+    VkCommandBuffer m = wp_get(g_cur, WP_GLUE);   // in order: the segment's images into its layouts, the segment, then each chunk's move and the chunk
+    glue(m, pt);
+    vk.vkEndCommandBuffer(m);
+    g_mt_list[g_mt_nlist++] = m;
+    g_mt_list[g_mt_nlist++] = pro;
+    for (; g_mt_sent < upto; g_mt_sent++) {
+        m = wp_get(g_cur, WP_GLUE);
+        g_glue_images += (uint64_t)g_ch[g_mt_sent].trk.n;
+        glue(m, &g_ch[g_mt_sent].trk);
+        vk.vkEndCommandBuffer(m);
+        g_mt_list[g_mt_nlist++] = m;
+        g_mt_list[g_mt_nlist++] = g_ch[g_mt_sent].cb;
+    }
+    if (!final) {
+        VkCommandBufferSubmitInfo cbi[3 * MT_MAXCH + 5];
+        int ncbi = 0;
+        if (!g_slot_sent) {
+            vk.vkEndCommandBuffer(g_slots[g_cur].cb);
+            cbi[ncbi++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = g_slots[g_cur].cb};
+            g_slot_sent = 1;
+        }
+        for (int i = 0; i < g_mt_nlist; i++)
+            cbi[ncbi++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = g_mt_list[i]};
+        g_mt_nlist = 0;
+        VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (uint32_t)ncbi, .pCommandBufferInfos = cbi};
+        uint64_t ts0 = runtime_now_ns();
+        vk_queue_lock();
+        VkResult r = vk.vkQueueSubmit2(vkc.queue, 1, &si, VK_NULL_HANDLE);
+        vk_queue_unlock();
+        vkb_step_add(PK_SUBMIT, ts0);
+        if (r != VK_SUCCESS) { vk_check(r, "vkQueueSubmit2 (progressive)"); checkpoint_report(); die("GPU submission failed"); }
+        g_mt_sends++;
+    }
+    pthread_mutex_unlock(&g_send_mu);
+}
+
 void vkb_mt_submit(const uint64_t *h, int n) {   // after mtl_sub_begin and the uniform capture; commits
     uint64_t t0 = runtime_now_ns();
-    static uint64_t walk_ns, wall_ns, subs, chunks, said_at, glue_images;
+    static uint64_t walk_ns, wall_ns, subs, chunks, said_at, big_ns, big_draws, all_draws;
     static int started;
     if (!started) {
         started = 1;
@@ -2026,9 +2117,10 @@ void vkb_mt_submit(const uint64_t *h, int n) {   // after mtl_sub_begin and the 
     g_mt_avail = g_mt_next = g_mt_done = 0;
     g_nch = 0;
     pthread_mutex_unlock(&g_mt_mu);
+    g_mt_sent = 0; g_mt_nlist = 0;
     // the prologue: objects made on first use, the pool copies of the last submissions
-    g_pro_cb = wp_get(g_cur, VKB_MAXREC);
-    vkb_trk_reset(&g_pro_trk);
+    g_pro_cb = wp_get(g_cur, WP_PRO);
+    vkb_trk_reset(g_pro_trk);
     t_recording = 1;
     vkb_pro_begin();
     vkb_draw_mt_init();
@@ -2047,36 +2139,29 @@ void vkb_mt_submit(const uint64_t *h, int n) {   // after mtl_sub_begin and the 
     g_walk_rt = g_rt; g_walk_off = g_render_off; g_walk_stride = vkb_copy_stride_get(); g_walk_have = 1;
     walk_ns += runtime_now_ns() - tw;
     // this thread records chunks too, then waits for the others
-    for (int k; (k = mt_take()) >= 0;) { mt_record(&g_ch[k]); mt_recorded(); }
+    for (int k; (k = mt_take()) >= 0;) { mt_record(&g_ch[k]); mt_recorded(k); }
     pthread_mutex_lock(&g_mt_mu);
     while (g_mt_done < g_nch) pthread_cond_wait(&g_mt_done_cv, &g_mt_mu);
     pthread_mutex_unlock(&g_mt_mu);
-    // in order: the slot's command buffer moves images into the prologue's layouts, then each chunk's move and the chunk
-    vk.vkEndCommandBuffer(g_pro_cb);
-    glue(g_slots[g_cur].cb, &g_pro_trk);
-    g_mt_nlist = 0;
-    g_mt_list[g_mt_nlist++] = g_pro_cb;
-    for (int k = 0; k < g_nch; k++) {
-        VkCommandBuffer m = wp_get(g_cur, VKB_MAXREC);
-        glue_images += (uint64_t)g_ch[k].trk.n;
-        glue(m, &g_ch[k].trk);
-        vk.vkEndCommandBuffer(m);
-        g_mt_list[g_mt_nlist++] = m;
-        g_mt_list[g_mt_nlist++] = g_ch[k].cb;
-    }
-    g_mt_list[g_mt_nlist++] = wp_get(g_cur, VKB_MAXREC);   // the end
+    // what is not sent yet: the last prologue segment, the chunks after the last send, then the end (copies back)
+    mt_send(1);
+    g_mt_list[g_mt_nlist++] = wp_get(g_cur, WP_GLUE);
     mtl_sub_commit();
     g_mt_nlist = 0;
     wall_ns += runtime_now_ns() - t0;
     subs++; chunks += (uint64_t)g_nch;
+    { int b = 0; for (int k = 0; k < g_nch; k++) { all_draws += g_ch[k].draws; if (g_ch[k].ns > g_ch[b].ns) b = k; }
+      if (g_nch) { big_ns += g_ch[b].ns; big_draws += g_ch[b].draws; } }
     if (subs >= said_at + 600) {   // the log line: where a submission's recording time goes
         said_at = subs;
         static uint64_t prev_rec;
         uint64_t rec = vkb_cnt_sum(g_mt_rec_ns);
         VLOG("recording threads: per submission %.1f ms until submitted (walk %.1f ms), chunks %.1f, chunk recording %.1f ms in all "
-             "threads, images moved between chunks %.0f", wall_ns / 1e6 / 600, walk_ns / 1e6 / 600, chunks / 600.0,
-             (rec - prev_rec) / 1e6 / 600, glue_images / 600.0);
-        prev_rec = rec; wall_ns = walk_ns = chunks = glue_images = 0;
+             "threads, images moved between chunks %.0f; the longest chunk %.1f ms, %.0f of %.0f draws", wall_ns / 1e6 / 600,
+             walk_ns / 1e6 / 600, chunks / 600.0, (rec - prev_rec) / 1e6 / 600, g_glue_images / 600.0, big_ns / 1e6 / 600,
+             big_draws / 600.0, all_draws / 600.0);
+        VLOG("  progressive submission: %.1f submits before the last per submission", g_mt_sends / 600.0);
+        prev_rec = rec; wall_ns = walk_ns = chunks = g_glue_images = big_ns = big_draws = all_draws = g_mt_sends = 0;
     }
 }
 
