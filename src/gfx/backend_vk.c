@@ -956,6 +956,23 @@ static void full_barrier(VkCommandBuffer cb) {
     vk.vkCmdPipelineBarrier2(cb, &di);
 }
 
+// The game's barriers (nvnCommandBufferBarrier) by what they ask. Each used to end the pass and drain the whole GPU,
+// ~100 a frame. Invalidating ZCull or texture descriptors means nothing here; ordering primitives alone, within a
+// pass, is what Vulkan rasterization does anyway. What remains (fragments or indirect data ordered, texture or shader
+// caches invalidated: earlier writes read later) still ends the pass with a full barrier.
+// TOTK_VK_GAME_BARRIER=full: every barrier as before (A/B).
+static vkb_cnt g_gb_kept, g_gb_skipped;
+static void game_barrier(int32_t bits) {
+    static int full = -1;
+    if (full < 0) { const char *e = getenv("TOTK_VK_GAME_BARRIER"); full = e && !strcmp(e, "full"); }
+    enum { ORDER_PRIM = 0x1, ORDER_FRAG = 0x2, ORDER_FRAG_TILED = 0x4, ORDER_INDIRECT = 0x8, INV_TEX = 0x10, INV_SHADER = 0x20 };
+    int needed = bits & (ORDER_FRAG | ORDER_FRAG_TILED | ORDER_INDIRECT | INV_TEX | INV_SHADER);
+    if (!full && !needed) { vkb_cnt_add(g_gb_skipped, 1); return; }
+    vkb_cnt_add(g_gb_kept, 1);
+    pass_end_why(PE_BARRIER);
+    full_barrier(vkb_cmd());
+}
+
 // TOTK_WATCH=<address>:<bytes>: GPU-side writes into that range (buffer copies, inline uniform updates) are logged too.
 static int watched(uint64_t dst, uint64_t n) {
     static uint64_t lo, hi;
@@ -1493,6 +1510,12 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                  (double)(vkb_cnt_sum(g_n_passes) - pp) / f, (double)(vkb_cnt_sum(g_n_barriers) - pb) / f,
                  (double)(vkb_cnt_sum(g_n_img_barriers) - pi) / f, (double)(g_parts - pparts) / f);
             pparts = g_parts;
+            {
+                static uint64_t pk, ps;
+                uint64_t k = vkb_cnt_sum(g_gb_kept), s = vkb_cnt_sum(g_gb_skipped);
+                VLOG("per frame: game barriers %.1f kept, %.1f with nothing to do here", (double)(k - pk) / f, (double)(s - ps) / f);
+                pk = k; ps = s;
+            }
             static const char *const why[PE_COUNT] = {"other", "set targets", "game barrier", "buffer copy", "uniform update", "texture clear",
                 "end of submission", "after a storing draw", "snapshot", "sampled targets changed", "texture to prepare", "mirror", "dispatch", "texture copy", "pool copies"};
             static uint64_t prev[PE_COUNT];
@@ -1644,9 +1667,7 @@ static int exec_ops(const uint8_t *p, int depth, int mode, int hidx, const mt_ch
             if (g_ok == 1) vkb_draw(a, h.op == OP_DRAW_IDX);
             break;
         case OP_DISPATCH: if (g_ok == 1) vkb_dispatch(a); break;
-        case OP_BARRIER:   // [temporary] everything before is visible to everything after
-            if (g_ok == 1) { pass_end_why(PE_BARRIER); full_barrier(vkb_cmd()); }
-            break;
+        case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (g_ok == 1) game_barrier(bits); break; }
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_BIND_SAMP: break;
         // rendering enable / conditional rendering: draws and clears are skipped while off (dispatches are not)
         case OP_RENDER_ENABLE: g_render_off = !((const p_flag *)a)->value; break;
