@@ -80,6 +80,16 @@ void vkb_slot_reset(int slot) {   // the slot's previous submission has complete
     g_mpool[slot].used = 0;
 }
 
+void vkb_ring_stats(uint64_t *chunks, uint64_t *bytes, uint64_t *pairs) {   // memory log (racy reads: counts only)
+    *chunks = *bytes = *pairs = 0;
+    for (int s = 0; s < VKB_SLOTS; s++)
+        for (int w = 0; w < VKB_MAXREC; w++) {
+            const slot_res *r = &g_res[s][w];
+            if (r->n) (*pairs)++;
+            for (int i = 0; i < r->n; i++) { (*chunks)++; *bytes += r->c[i].size; }
+        }
+}
+
 void *vkb_ring_alloc(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDeviceSize *off) {
     slot_res *r = &g_res[vkb_slot()][vkb_worker()];
     for (;;) {

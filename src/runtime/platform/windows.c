@@ -80,6 +80,82 @@ void plat_commit(uint64_t addr, uint64_t size) {
                 (unsigned long long)size, GetLastError());
 }
 
+// PROCESS_MEMORY_COUNTERS_EX and its kernel32 entry (psapi.h is not in the trimmed toolchain)
+typedef struct {
+    DWORD cb, PageFaultCount;
+    SIZE_T PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage, QuotaPeakNonPagedPoolUsage,
+           QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage, PrivateUsage;
+} mem_counters;
+__declspec(dllimport) BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process, mem_counters *counters, DWORD cb);
+
+void plat_memory_map(void) {
+    mem_counters pc = {.cb = sizeof pc};
+    K32GetProcessMemoryInfo(GetCurrentProcess(), &pc, sizeof pc);
+    // the heaps' committed regions (HeapWalk region entries), to tell them apart from other private memory
+    enum { MAXR = 4096, TOP = 12 };
+    static struct { uint64_t lo, hi; } hr[MAXR];
+    int nhr = 0;
+    uint64_t heap_commit = 0, heap_used = 0;
+    HANDLE heaps[64];
+    DWORD nh = GetProcessHeaps(64, heaps);
+    for (DWORD h = 0; h < nh && h < 64; h++) {
+        if (!HeapLock(heaps[h])) continue;
+        PROCESS_HEAP_ENTRY e = {0};
+        while (HeapWalk(heaps[h], &e)) {
+            if (e.wFlags & PROCESS_HEAP_REGION) {
+                heap_commit += e.Region.dwCommittedSize;
+                if (nhr < MAXR) { hr[nhr].lo = (uint64_t)(uintptr_t)e.lpData; hr[nhr].hi = (uint64_t)(uintptr_t)e.Region.lpLastBlock; nhr++; }
+            } else if (e.wFlags & PROCESS_HEAP_ENTRY_BUSY) heap_used += e.cbData;
+        }
+        HeapUnlock(heaps[h]);
+    }
+    uint64_t guest = 0, priv = 0, mapped = 0, image = 0, in_heap = 0;
+    struct { uint64_t base, size; } top[TOP] = {{0}};
+    static const uint64_t edge[] = {64 << 10, 1 << 20, 4 << 20, 16 << 20, 63 << 20, 65 << 20, UINT64_MAX};   // size classes
+    enum { NB = sizeof edge / sizeof edge[0] };
+    uint64_t bn[NB] = {0}, bb[NB] = {0};
+    for (uint64_t a = 0x10000; a < 0x7FFFFFFF0000ull;) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
+        uint64_t base = (uint64_t)(uintptr_t)mi.BaseAddress, size = mi.RegionSize;
+        if (mi.State == MEM_COMMIT) {
+            if (base >= g_lo && base < g_hi) guest += size;
+            else if (mi.Type == MEM_IMAGE) image += size;
+            else if (mi.Type == MEM_MAPPED) mapped += size;
+            else {
+                int heap = 0;
+                for (int i = 0; i < nhr && !heap; i++) heap = base >= hr[i].lo && base < hr[i].hi + 1;
+                if (heap) in_heap += size;
+                else {
+                    priv += size;
+                    int c = 0;
+                    while (size >= edge[c]) c++;
+                    bn[c]++; bb[c] += size;
+                    int k = TOP - 1;
+                    if (size > top[k].size) {
+                        while (k > 0 && size > top[k - 1].size) { top[k] = top[k - 1]; k--; }
+                        top[k].base = base; top[k].size = size;
+                    }
+                }
+            }
+        }
+        a = base + size;
+    }
+    const double M = 1048576.0;
+    fprintf(stderr, "[mem] commit charge %.0f MiB (peak %.0f), in RAM %.0f MiB (peak %.0f); committed: guest window %.0f, "
+            "heaps %.0f (in use %.0f, %d regions; %.0f found by the walk), other private %.0f, mapped %.0f, images %.0f MiB\n",
+            pc.PrivateUsage / M, pc.PeakPagefileUsage / M, pc.WorkingSetSize / M, pc.PeakWorkingSetSize / M, guest / M,
+            heap_commit / M, heap_used / M, nhr, in_heap / M, priv / M, mapped / M, image / M);
+    static const char *const cls[NB] = {"<64K", "64K-1M", "1-4M", "4-16M", "16-63M", "~64M", ">65M"};
+    char line[512];
+    int at = 0;
+    for (int c = 0; c < NB; c++)
+        if (bn[c]) at += snprintf(line + at, sizeof line - (size_t)at, " %s: %llu = %.0f MiB;", cls[c], (unsigned long long)bn[c], bb[c] / M);
+    fprintf(stderr, "[mem]   other private by region size:%s\n", at ? line : " -");
+    for (int k = 0; k < TOP && top[k].size; k++)
+        fprintf(stderr, "[mem]   private %016llx +%.1f MiB\n", (unsigned long long)top[k].base, top[k].size / M);
+}
+
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     DWORD p = prot == PLAT_PROT_NONE ? PAGE_NOACCESS : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_READWRITE, old;
     if (addr >= g_lo && addr < g_hi) plat_commit(addr, size);

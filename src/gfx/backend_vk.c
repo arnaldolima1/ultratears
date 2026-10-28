@@ -23,6 +23,7 @@
 #include "vkb_audit.h"
 #include "vkb_lock.h"
 #include "nvn/totk_timeline.h"
+#include "nvn/totk_vpool.h"
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
 
@@ -155,6 +156,19 @@ static void memory_log(void) {
          "host %.0f MiB (peak %.0f); game memory imported %.0f MiB", drv[0] ? drv : " -", atomic_load(&g_mem_bytes[MK_DEVICE]) / 1048576.0,
          (unsigned long long)atomic_load(&g_mem_count[MK_DEVICE]), atomic_load(&g_mem_peak[MK_DEVICE]) / 1048576.0, vkb_shadow_bytes() / 1048576.0,
          atomic_load(&g_mem_bytes[MK_HOST]) / 1048576.0, atomic_load(&g_mem_peak[MK_HOST]) / 1048576.0, atomic_load(&g_mem_bytes[MK_IMPORT]) / 1048576.0);
+    void plat_memory_map(void);   // runtime/platform.h
+    static int map = -1;
+    if (map < 0) map = getenv("TOTK_MEMMAP") != NULL;
+    if (map) {   // development: the whole process by kind (slow)
+        plat_memory_map();
+        uint64_t vb, vn;
+        totk_vpool_host_stats(&vb, &vn);
+        VLOG("memory: CPU_NO_ACCESS physical pools' own storage %.0f MiB in %llu", vb / 1048576.0, (unsigned long long)vn);
+        uint64_t rc, rb, rp;
+        vkb_ring_stats(&rc, &rb, &rp);
+        VLOG("memory: upload rings %.0f MiB in %llu chunks over %llu slot x thread pairs", rb / 1048576.0, (unsigned long long)rc,
+             (unsigned long long)rp);
+    }
 }
 
 static void backend_init(void) {

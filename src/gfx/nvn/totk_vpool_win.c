@@ -26,6 +26,8 @@ typedef struct vtable { const pool_t *pool; uint64_t npages; vpage *pages; struc
 static vtable *g_tables;
 static pthread_mutex_t g_map_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_map_gen = 1;   // bumped by every MapVirtual: textures in virtual pools upload again
+static _Atomic uint64_t g_host_bytes, g_host_pools;   // CPU_NO_ACCESS physical pools' own storage
+void totk_vpool_host_stats(uint64_t *bytes, uint64_t *pools) { *bytes = atomic_load(&g_host_bytes); *pools = atomic_load(&g_host_pools); }
 
 static vtable *table_of(const pool_t *v) {
     for (vtable *t = g_tables; t; t = t->next) if (t->pool == v) return t;
@@ -43,6 +45,7 @@ int totk_vpool_init(pool_t *o) {
     o->span = o->size;
     if (phys) {   // CPU_NO_ACCESS: our own storage
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (o->host) { atomic_fetch_add(&g_host_bytes, o->span); atomic_fetch_add(&g_host_pools, 1); }
     } else {      // virtual: addresses only
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE, PAGE_NOACCESS);
         vtable *t = calloc(1, sizeof *t);
@@ -63,6 +66,7 @@ int totk_vpool_fini(pool_t *o) {
     for (vtable **p = &g_tables; *p; p = &(*p)->next)
         if ((*p)->pool == o) { vtable *t = *p; *p = t->next; free(t->pages); free(t); break; }
     pthread_mutex_unlock(&g_map_mu);
+    if (o->flags & F_PHYSICAL) { atomic_fetch_sub(&g_host_bytes, o->span); atomic_fetch_sub(&g_host_pools, 1); }
     VirtualFree(o->host, 0, MEM_RELEASE);
     o->host = NULL; o->mem = o->game_mem; o->span = 0;
     return 1;

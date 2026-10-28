@@ -42,6 +42,7 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
+void plat_memory_map(void) {}
 
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {  // (no write tracking)
     (void)addr; (void)size; (void)pages; (void)max; (void)page;

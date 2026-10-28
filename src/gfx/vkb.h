@@ -38,6 +38,7 @@ void vkb_checkpoint(const char *what, const char *k1, const char *k2);   // TOTK
 int vkb_in_pass(void);
 // Host-visible upload memory of the current submission (reused after its fence): n bytes aligned to `align`.
 void *vkb_ring_alloc(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDeviceSize *off);
+void vkb_ring_stats(uint64_t *chunks, uint64_t *bytes, uint64_t *pairs);   // upload memory now: chunks, bytes, slot x thread pairs
 VkCommandBuffer vkb_cmd(void);    // the command buffer of the submission being replayed
 int vkb_render_suppressed(void);   // rendering disabled or conditional (recorded state; audit)
 int vkb_ready(void);              // 1 when replaying on a Vulkan device
