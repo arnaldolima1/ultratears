@@ -27,6 +27,29 @@ int vk_check(VkResult r, const char *what) {
     return 0;
 }
 
+void vk_fault_report(void) {
+    static int done;
+    if (!vkc.has_fault || !vk.vkGetDeviceFaultInfoEXT || done++) return;
+    VkDeviceFaultCountsEXT n = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (vk.vkGetDeviceFaultInfoEXT(vkc.device, &n, NULL) != VK_SUCCESS) { LOG("device fault: no information"); return; }
+    VkDeviceFaultAddressInfoEXT addr[16];
+    VkDeviceFaultVendorInfoEXT vend[16];
+    if (n.addressInfoCount > 16) n.addressInfoCount = 16;
+    if (n.vendorInfoCount > 16) n.vendorInfoCount = 16;
+    n.vendorBinarySize = 0;
+    VkDeviceFaultInfoEXT info = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
+    VkResult r = vk.vkGetDeviceFaultInfoEXT(vkc.device, &n, &info);
+    LOG("device fault (%d): %s; %u addresses, %u vendor records", (int)r, info.description, n.addressInfoCount, n.vendorInfoCount);
+    static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "instruction pointer unknown",
+                                       "instruction pointer invalid", "instruction pointer fault"};
+    for (uint32_t i = 0; i < n.addressInfoCount; i++)
+        LOG("  %s at %#llx (+/- %#llx)", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
+            (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+    for (uint32_t i = 0; i < n.vendorInfoCount; i++)
+        LOG("  vendor: %s (code %#llx, data %#llx)", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
+            (unsigned long long)vend[i].vendorFaultData);
+}
+
 static int has_layer(const char *name) {
     uint32_t n = 0;
     vk.vkEnumerateInstanceLayerProperties(&n, NULL);
@@ -184,6 +207,7 @@ static VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT ffld = {VK_
 static int has_fl, has_fld;
 static VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR flr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR};
 static int has_lr;
+static VkPhysicalDeviceFaultFeaturesEXT ffault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
 
 static int create_device(void) {
     ExtList ex = device_extensions(vkc.gpu);
@@ -222,6 +246,8 @@ static int create_device(void) {
         {VK_AMD_BUFFER_MARKER_EXTENSION_NAME, NULL, &vkc.has_markers},
         // the overlay's video memory figures
         {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, NULL, &vkc.has_memory_budget},
+        // a lost device's fault: address and kind (no cost while nothing faults)
+        {VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &ffault, &vkc.has_fault},
 #ifdef __APPLE__
         // (fork) a portability driver (MoltenVK) must have this one enabled
         {"VK_KHR_portability_subset", NULL, NULL},
@@ -244,6 +270,8 @@ static int create_device(void) {
     }
     vkc.has_feedback_loop = has_fl && has_fld && ffl.attachmentFeedbackLoopLayout && ffld.attachmentFeedbackLoopDynamicState;
     vkc.has_local_read = has_lr && flr.dynamicRenderingLocalRead;
+    vkc.has_fault = vkc.has_fault && ffault.deviceFault;
+    ffault.deviceFaultVendorBinary = VK_FALSE;   // (a crash dump blob: not read)
     // Without the extensions (AMD's driver has the layout but not the dynamic state that shader objects need) a target
     // sampled while bound stays attached in GENERAL, as DXVK does for feedback loops; with local read the barrier
     // inside the pass orders it. TOTK_VK_FB_GENERAL=0: such textures read empty instead (the old behaviour);

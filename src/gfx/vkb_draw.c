@@ -1728,8 +1728,11 @@ void vkb_draw(const uint8_t *a, int indexed) {
     // A draw that samples a target of its pass sees what earlier draws of the pass wrote there only after a barrier
     // inside the pass (VK_KHR_dynamic_rendering_local_read, by region: each pixel waits for its own writes). Without it
     // the read may see old contents (as SavageWind found with BotW's terrain, which ORs bits into its G-buffer pixel).
-    static int no_local = -1;   // TOTK_VK_NO_LOCAL_BARRIER=1 (development A/B): no barrier inside the pass
-    if (no_local < 0) { const char *e = getenv("TOTK_VK_NO_LOCAL_BARRIER"); no_local = e && *e == '1'; }
+    // Off by default (TOTK_VK_LOCAL_BARRIER=1: on): on AMD each such barrier drains the GPU, and TOTK's decal passes
+    // read their G-buffer at almost every draw - one pass took 6-11 ms of GPU for ~100 draws, 0.07 ms without the
+    // barriers, with no visible difference (Great Sky Island, 2026-10-27).
+    static int no_local = -1;
+    if (no_local < 0) { const char *e = getenv("TOTK_VK_LOCAL_BARRIER"); no_local = !(e && *e == '1'); }
     if (g_fb && vkc.has_local_read && !no_local && wrote_pass == vkb_pass_serial()) {
         VkMemoryBarrier2 mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,

@@ -686,6 +686,7 @@ static void markers_report(void) {
         }
     }
 }static void checkpoint_report(void) {
+    vk_fault_report();
     markers_report();
     if (!vkc.has_checkpoints || !g_ckpt) return;
     VkCheckpointDataNV d[16];
