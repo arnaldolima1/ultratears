@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "compat/gfx_compat.h"
 #include "host/hle.h"
@@ -250,7 +251,7 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t 
             FILE *f = fopen(path, "wb");
             if (f) { fwrite(spv, 4, nw, f); fclose(f); }
         }
-        vkb_shbin_variant id = {{intmask, sintmask, outmask, out_umask, out_imask}};
+        vkb_shbin_variant id = {{intmask, sintmask, outmask, out_umask, out_imask}, s->stamp};
         if (make_object(s->key, &id, VK_SHADER_STAGE_VERTEX_BIT, spv, nw * 4, &obj) != VK_SUCCESS) obj = VK_NULL_HANDLE;
     }
     free(a);
@@ -272,12 +273,21 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t 
     return obj;
 }
 
+// Which translation of a shader: its .res.json's last write (seconds) and size, as the compiled binaries are keyed
+// (vkb_shbin_variant.stamp). Taken from _stat64 here and from FindFirstFile in ahead_thread: the same numbers.
+static uint32_t stamp_of(uint64_t mtime_s, uint64_t size) {
+    uint64_t h = (mtime_s * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+    return (uint32_t)(h ^ h >> 32) | 1;   // never 0
+}
+
 // Reads the reflection into s and rewrites the SPIR-V bindings into the universal layout: *spv_out (malloc) of
 // *bytes. The shader object is made by the caller.
 static int load_module(vkb_shader *s, const char *key, int nvn_stage, uint32_t **spv_out, size_t *bytes) {
     char path[1024];
     snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
     char *j = read_file(path, NULL);
+    struct _stat64 st;
+    s->stamp = _stat64(path, &st) == 0 ? stamp_of((uint64_t)st.st_mtime, (uint64_t)st.st_size) : 0;
     snprintf(path, sizeof path, "%s/%s.spv", cache_dir(), key);
     size_t nspv = 0;
     uint32_t *spv = (uint32_t *)read_file(path, &nspv);
@@ -428,7 +438,7 @@ static int ensure(shentry *e, int on_draw) {
     VkShaderEXT obj = VK_NULL_HANDLE;
     VkShaderStageFlagBits st = first ? e->sh.vk_stage : again.vk_stage;
     if (ok) {
-        VkResult r = make_object(e->key, &(vkb_shbin_variant){{0}}, st, spv, bytes, &obj);
+        VkResult r = make_object(e->key, &(vkb_shbin_variant){{0}, first ? e->sh.stamp : again.stamp}, st, spv, bytes, &obj);
         if (r != VK_SUCCESS) { VLOG("shader %s: vkCreateShadersEXT %d", e->key, (int)r); ok = 0; }
     }
     if (ok && getenv("TOTK_VK_VALIDATION")) VLOG("shader %.12s = VkShaderEXT %#llx", e->key, (unsigned long long)(uintptr_t)obj);   // names validation messages
@@ -609,7 +619,9 @@ static void *ahead_thread(void *unused) {
         memcpy(key, fd.cFileName, 64);
         key[64] = 0;
         atomic_fetch_add(&g_ahead_total, 1);
-        vkb_shbin_variant v0 = {{0}};
+        uint64_t ft = (uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32 | fd.ftLastWriteTime.dwLowDateTime;
+        uint64_t mtime = ft >= 116444736000000000ull ? (ft - 116444736000000000ull) / 10000000ull : 0;   // FILETIME -> Unix seconds
+        vkb_shbin_variant v0 = {{0}, stamp_of(mtime, (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow)};
         if (vkb_shbin_has(key, &v0)) { atomic_fetch_add(&g_ahead_done, 1); continue; }
         char path[1024];
         snprintf(path, sizeof path, "%s/%s", cache_dir(), fd.cFileName);
@@ -623,7 +635,8 @@ static void *ahead_thread(void *unused) {
         size_t bytes;
         VkShaderEXT obj;
         if (load_module(&tmp, key, stage, &spv, &bytes)) {
-            if (make_object(key, &v0, tmp.vk_stage, spv, bytes, &obj) == VK_SUCCESS) {
+            vkb_shbin_variant v = {{0}, tmp.stamp};   // as the game will look it up (load_module)
+            if (!vkb_shbin_has(key, &v) && make_object(key, &v, tmp.vk_stage, spv, bytes, &obj) == VK_SUCCESS) {
                 vk.vkDestroyShaderEXT(vkc.device, obj, NULL);   // only its binary was wanted; no command ever saw it
                 atomic_fetch_sub(&g_obj_live, 1);
                 atomic_fetch_add(&g_ahead_made, 1);

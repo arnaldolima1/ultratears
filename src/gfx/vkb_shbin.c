@@ -4,8 +4,9 @@
 // shader objects follow the game's programs - made when the game sets a program, destroyed when it finalizes it -
 // without compiling again on the way back (vkb_shader.c). The file belongs to one driver build: its header holds the
 // driver's shaderBinaryUUID and shaderBinaryVersion; another driver starts the file over.
-//   header (32 bytes): "UTSHBIN1", UUID (16), version (u32), 0 (u32)
-//   record: tag "SHB1", key (32 bytes, the SHA-256 the key's hex digits spell), variant masks (5 x u32), size (u32), data
+//   header (32 bytes): "UTSHBIN2", UUID (16), version (u32), 0 (u32)
+//   record: tag "SHB1", key (32 bytes, the SHA-256 the key's hex digits spell), variant masks (5 x u32), translation
+//   stamp (u32), size (u32), data
 // A record cut short (the game stopped while writing) and what follows it are dropped when the file is opened.
 #include <io.h>
 #include <stdio.h>
@@ -19,8 +20,8 @@
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
 
-enum { CAP = 1 << 17, HEADER = 32, RECORD = 60 };
-static const char MAGIC[8] = {'U', 'T', 'S', 'H', 'B', 'I', 'N', '1'};
+enum { CAP = 1 << 17, HEADER = 32, RECORD = 64 };
+static const char MAGIC[8] = {'U', 'T', 'S', 'H', 'B', 'I', 'N', '2'};   // 2: with the translation stamp
 static const uint32_t TAG = 0x31424853;   // "SHB1"
 
 typedef struct { uint8_t key[32]; vkb_shbin_variant v; uint64_t off; uint32_t size; uint8_t state; } slot_t;   // state: 0 free, 1 used, 2 dropped
@@ -46,7 +47,7 @@ static int unhex(const char *key, uint8_t out[32]) {
 static slot_t *find(const uint8_t key[32], const vkb_shbin_variant *v, int add) {   // g_mu held
     uint32_t h;
     memcpy(&h, key, 4);
-    h ^= v->m[0] * 0x9E3779B1u ^ v->m[2] * 0x85EBCA77u;
+    h ^= v->m[0] * 0x9E3779B1u ^ v->m[2] * 0x85EBCA77u ^ v->stamp;
     slot_t *grave = NULL;
     for (uint32_t i = 0; i < CAP; i++) {
         slot_t *s = &g_tab[(h + i) & (CAP - 1)];
@@ -93,7 +94,7 @@ static void open_file(void) {   // g_mu held
         if (_fseeki64(f, (long long)at, SEEK_SET) || fread(r, 1, RECORD, f) != RECORD) break;
         uint32_t tag, size;
         memcpy(&tag, r, 4);
-        memcpy(&size, r + 56, 4);
+        memcpy(&size, r + 60, 4);
         if (tag != TAG || !size) break;
         if (_fseeki64(f, (long long)(at + RECORD + size - 1), SEEK_SET)) break;
         uint8_t last;
@@ -154,7 +155,7 @@ void vkb_shbin_put(const char *key, const vkb_shbin_variant *v, const void *data
         memcpy(r, &TAG, 4);
         memcpy(r + 4, k, 32);
         memcpy(r + 36, v, sizeof *v);
-        memcpy(r + 56, &n, 4);
+        memcpy(r + 60, &n, 4);
         if (!_fseeki64(g_f, (long long)g_end, SEEK_SET) && fwrite(r, 1, RECORD, g_f) == RECORD && fwrite(data, 1, size, g_f) == size &&
             fflush(g_f) == 0) {
             s->off = g_end + RECORD; s->size = n; s->state = 1;

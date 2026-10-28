@@ -4,8 +4,9 @@
 #include <stdint.h>
 
 // variant: the vertex shader variant's masks (vkb_variant: intmask, sintmask, outmask, out_umask, out_imask); all 0 for
-// the shader itself.
-typedef struct { uint32_t m[5]; } vkb_shbin_variant;
+// the shader itself. stamp: which translation of the shader (its .res.json time and size, vkb_shader.c): a shader
+// translated again (a translator fix, an update) is not found and is compiled anew.
+typedef struct { uint32_t m[5]; uint32_t stamp; } vkb_shbin_variant;
 
 // The binary of (key, variant) made by this driver: *data (malloc) of *size bytes. 0: not there.
 int vkb_shbin_get(const char *key, const vkb_shbin_variant *v, void **data, size_t *size);

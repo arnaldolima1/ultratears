@@ -40,6 +40,7 @@ typedef struct {
     int unsupported;                     // a resource outside the layout: draws with it are skipped
     const char *key;                     // SHA-256 key of the translation (traces)
     uint32_t *spv; size_t nspv_words;    // vertex shaders: the module as loaded (bindings rewritten), for variants
+    uint32_t stamp;                      // which translation (vkb_shbin_variant.stamp)
     uint32_t in_mask, out_mask;          // input / output locations
     uint32_t in_umask, in_imask;         // inputs of unsigned / signed integer type (fragment shaders)
     vkb_variant variants[VKB_VARIANTS]; int nvariants;   // vertex variants (integer attributes, added outputs) made so far
