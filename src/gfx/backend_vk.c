@@ -1061,7 +1061,10 @@ typedef struct { uint32_t w, h, ncolor, fmt0, depth, draws; uint64_t draws0; cha
 static VkQueryPool g_ppq;
 static pp_info g_pp[PP_MAX];
 static int g_ppn, g_pp_done, g_pp_open = -1;
+static _Atomic long long g_pp_req;   // F9 in the game window (vkb_passprof_request): a frame a few presents ahead
 static long long pp_frame(void) {
+    long long req = atomic_load(&g_pp_req);
+    if (req) return req;
     static long long at = -1;
     if (at < 0) { const char *e = getenv("TOTK_GPU_PASSPROF"); at = e ? atoll(e) : 0; }
     return at;
@@ -1096,6 +1099,14 @@ static void pp_end(VkCommandBuffer cb) {
 static int pp_cmp(const void *a, const void *b) {
     double x = ((const double *)a)[0], y = ((const double *)b)[0];
     return x < y ? 1 : x > y ? -1 : 0;
+}
+void vkb_passprof_request(void) {   // window_sdl.c (F9); a profile still being taken is left to finish
+    if (g_ppn && !g_pp_done) return;
+    if (g_ppq) vk.vkResetQueryPool(vkc.device, g_ppq, 0, PP_MAX);
+    g_ppn = 0;
+    g_pp_done = 0;
+    atomic_store(&g_pp_req, (long long)vkb_frame() + 4);
+    VLOG("pass profile asked for present %lld (F9)", (long long)vkb_frame() + 4);
 }
 static void pp_report(void) {   // at a present after the frame: wait for the GPU, read, print
     if (!g_ppn || g_pp_done || pp_frame() <= 0 || vkb_frame() <= (uint64_t)pp_frame()) return;
@@ -1785,6 +1796,8 @@ int vkb_mt_on(void) {
         VLOG("recording threads: %d%s%s", n, why ? " (one: " : "", why ? why : "");
         if (why) VLOG("  (one thread while %s is set)", why);
     }
+    long long req = atomic_load(&g_pp_req);   // F9's frame is recorded by one thread (its pass list follows the recording)
+    if (n > 1 && req && !g_pp_done && vkb_frame() + 2 >= (uint64_t)req) return 0;
     return n > 1;
 }
 

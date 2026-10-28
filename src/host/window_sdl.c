@@ -36,6 +36,7 @@ static SDL_Gamepad *pad;
 static SDL_Mutex *pad_lock;
 static bool hidden_until_frame;
 uint64_t vkb_gpu_ns_total(void);   // src/gfx/backend_vk.c
+void vkb_passprof_request(void);    // F9: the GPU time of each render pass of a frame, into the log
 int totk_fps60(void);              // src/host/frame_step.c
 void totk_fps60_set(int on);
 
@@ -357,6 +358,10 @@ _Noreturn void window_loop(void) {
                         (e.key.scancode == SDL_SCANCODE_F11 ||
                          (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT)))) {
                         toggle_fullscreen();
+                        break;
+                    }
+                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F9) {
+                        vkb_passprof_request();
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
