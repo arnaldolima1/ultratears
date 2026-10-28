@@ -1775,10 +1775,11 @@ void vkb_draw(const uint8_t *a, int indexed) {
     VkShaderStageFlagBits stages[5] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
                                        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_GEOMETRY_BIT};
     uint32_t sint, ints = int_attributes(&sint) & vs->in_mask;   // integer attributes: the vertex shader's variant for them
-    VkShaderEXT vobj = ints ? vkb_shader_variant(vs, ints, sint) : vs->obj;
+    int unwritten = fs && (fs->in_mask & ~vs->out_mask);   // fragment inputs the vertex shader does not write: added
+    VkShaderEXT vobj = ints || unwritten ? vkb_shader_variant(vs, ints, sint, fs) : vs->obj;
     uint32_t int_inputs = vobj != vs->obj ? ints : 0;
     if (ints && !int_inputs) vkb_audit(A_ATTR_INT_AS_FLOAT, vs->key);
-    if (fs && (fs->in_mask & ~vs->out_mask)) vkb_audit(A_FS_INPUT_UNWRITTEN, fs->key);
+    if (unwritten && vobj == vs->obj) vkb_audit(A_FS_INPUT_UNWRITTEN, fs->key);
     if (S.has_ms && S.ms.enable && S.ms.samples > 1) vkb_audit(A_MULTISAMPLE, fs ? fs->key : vs->key);
     if (vkb_render_suppressed()) vkb_audit(A_RENDER_DISABLED, fs ? fs->key : vs->key);
     VkShaderEXT objs[5] = {vobj, fs ? fs->obj : VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};

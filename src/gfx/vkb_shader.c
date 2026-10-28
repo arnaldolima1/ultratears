@@ -174,41 +174,68 @@ static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, 
     return vk.vkCreateShadersEXT(vkc.device, 1, &ci, NULL, obj);
 }
 
+// TOTK_VK_FILL_OUTPUTS=0: no outputs added for fragment inputs the vertex shader does not write (A/B).
+static int fill_outputs_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TOTK_VK_FILL_OUTPUTS"); v = !(e && *e == '0'); }
+    return v;
+}
+
 // A vertex shader for integer attributes at the locations in intmask (signed where sintmask has the bit): those
-// inputs read the raw bits (vkb_spv.c). Made on first use and kept; 0 masks give the shader itself.
+// inputs read the raw bits; and, drawn with fs, with outputs (0, 0, 0, 1) at the fragment inputs it does not write
+// (vkb_spv.c). Made on first use and kept; nothing to change gives the shader itself.
 // [temporary] made during play (a compile on first use); the variant list and building ahead of time - phase 5.
-VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t sintmask) {
+VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t sintmask, const vkb_shader *fs) {
     vkb_shader *s = (vkb_shader *)cs;
     intmask &= s->in_mask;
     sintmask &= intmask;
-    if (!intmask || !s->spv) return s->obj;
+    uint32_t outmask = fs && fill_outputs_on() ? fs->in_mask & ~s->out_mask : 0;
+    uint32_t out_umask = fs ? fs->in_umask & outmask : 0, out_imask = fs ? fs->in_imask & outmask : 0;
+    if ((!intmask && !outmask) || !s->spv) return s->obj;
     pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < s->nvariants; i++)
-        if (s->variants[i].intmask == intmask && s->variants[i].sintmask == sintmask) { pthread_mutex_unlock(&g_mu); return s->variants[i].obj; }
+    for (int i = 0; i < s->nvariants; i++) {
+        const vkb_variant *v = &s->variants[i];
+        if (v->intmask == intmask && v->sintmask == sintmask && v->outmask == outmask && v->out_umask == out_umask &&
+            v->out_imask == out_imask) { pthread_mutex_unlock(&g_mu); return v->obj; }
+    }
+    int full = s->nvariants == VKB_VARIANTS;
     pthread_mutex_unlock(&g_mu);
-    uint32_t *out = NULL;
-    size_t nw = 0;
+    if (full) {   // not made again on every draw
+        static int said;
+        if (said++ < 8) VLOG("[temporary] shader %.12s: more than %d variants: the shader itself is used", s->key ? s->key : "?", VKB_VARIANTS);
+        return s->obj;
+    }
+    uint32_t *a = NULL, *b = NULL;
+    size_t na = 0, nb = 0;
+    const uint32_t *spv = s->spv;
+    size_t nw = s->nspv_words;
+    int ints_ok = !intmask, outs_ok = !outmask;
+    if (intmask && vkb_spv_int_inputs(spv, nw, intmask, sintmask, &a, &na)) { spv = a; nw = na; ints_ok = 1; }
+    if (outmask && vkb_spv_add_outputs(spv, nw, outmask, out_umask, out_imask, &b, &nb)) { spv = b; nw = nb; outs_ok = 1; }
     VkShaderEXT obj = VK_NULL_HANDLE;
-    if (vkb_spv_int_inputs(s->spv, s->nspv_words, intmask, sintmask, &out, &nw)) {
+    if (spv != s->spv && ints_ok) {   // (the caller takes any variant as one with the integer inputs)
         if (getenv("TOTK_SPV_DUMP")) {   // development: the variant's SPIR-V for spirv-val / spirv-dis
             char path[256];
-            snprintf(path, sizeof path, "%s/%.16s-i%x-s%x.spv", getenv("TOTK_SPV_DUMP"), s->key ? s->key : "x", intmask, sintmask);
+            snprintf(path, sizeof path, "%s/%.16s-i%x-s%x-o%x.spv", getenv("TOTK_SPV_DUMP"), s->key ? s->key : "x", intmask, sintmask, outmask);
             FILE *f = fopen(path, "wb");
-            if (f) { fwrite(out, 4, nw, f); fclose(f); }
+            if (f) { fwrite(spv, 4, nw, f); fclose(f); }
         }
-        if (create_object(VK_SHADER_STAGE_VERTEX_BIT, out, nw * 4, &obj) != VK_SUCCESS) obj = VK_NULL_HANDLE;
-        free(out);
+        if (create_object(VK_SHADER_STAGE_VERTEX_BIT, spv, nw * 4, &obj) != VK_SUCCESS) obj = VK_NULL_HANDLE;
     }
+    free(a);
+    free(b);
+    static int said, made;
     if (!obj) {
-        static int said;
-        if (said++ < 8) VLOG("[temporary] shader %.12s: no variant for integer inputs %#x: the float reading stays", s->key ? s->key : "?", intmask);
         obj = s->obj;
-    } else {
-        static int made;
-        if (made++ < 16) VLOG("shader %.12s: variant for integer inputs %#x (signed %#x)", s->key ? s->key : "?", intmask, sintmask);
-    }
+        ints_ok = !intmask;
+        outs_ok = !outmask;
+    } else if (made++ < 16)
+        VLOG("shader %.12s: variant for integer inputs %#x (signed %#x), outputs added %#x", s->key ? s->key : "?", intmask, sintmask,
+             outs_ok ? outmask : 0);
+    if (!ints_ok && said++ < 8) VLOG("[temporary] shader %.12s: no variant for integer inputs %#x: the float reading stays", s->key ? s->key : "?", intmask);
+    if (!outs_ok && said++ < 8) VLOG("[temporary] shader %.12s: outputs %#x not added: fragment inputs read undefined values", s->key ? s->key : "?", outmask);
     pthread_mutex_lock(&g_mu);
-    if (s->nvariants < VKB_VARIANTS) s->variants[s->nvariants++] = (vkb_variant){intmask, sintmask, obj};
+    if (s->nvariants < VKB_VARIANTS) s->variants[s->nvariants++] = (vkb_variant){intmask, sintmask, outmask, out_umask, out_imask, obj};
     pthread_mutex_unlock(&g_mu);
     return obj;
 }
@@ -303,6 +330,7 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
     if (r == VK_SUCCESS) {   // input / output locations: vertex variants; fragment inputs no vertex shader writes (audit)
         s->in_mask = vkb_spv_input_mask(spv, nspv / 4);
         s->out_mask = vkb_spv_output_mask(spv, nspv / 4);
+        vkb_spv_input_int_masks(spv, nspv / 4, &s->in_umask, &s->in_imask);
         uint32_t reads = vkb_spv_sbuf_reads(spv, nspv / 4, base + VKB_B_SBUF, s->nsbuf);
         for (int i = 0; i < s->nsbuf; i++) s->sbuf[i].read = (uint8_t)(reads >> i & 1);
     }
