@@ -129,7 +129,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
-// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
+// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to ultratears.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
 // (the start screen re-executing itself for the game) append to the same log.
 static char g_log_path[MAX_PATH];
@@ -141,12 +141,12 @@ static void log_to_file_without_console(void) {
     if (!n || n >= sizeof exe) return;
     char *slash = strrchr(exe, '\\');
     if (slash) slash[1] = 0;
-    snprintf(g_log_path, sizeof g_log_path, "%slasrecomp.log", exe);
-    bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
+    snprintf(g_log_path, sizeof g_log_path, "%sultratears.log", exe);
+    bool append = getenv("TOTK_LOG_APPEND") != NULL;
     if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
     setvbuf(stderr, NULL, _IONBF, 0);
     _dup2(_fileno(stderr), _fileno(stdout));
-    _putenv("LASRECOMP_LOG_APPEND=1");
+    _putenv("TOTK_LOG_APPEND=1");
 }
 
 // The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
@@ -154,7 +154,7 @@ static void log_to_file_without_console(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
+    MessageBoxA(NULL, "UltraTears needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
                 "UltraTears", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
@@ -284,7 +284,7 @@ void plat_print_backtrace(void) {
         const char *s = plat_symbol(pc, &off);
         if (!s) s = rt_host_fn_name(pc, &off);
         if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
-        else fprintf(stderr, "  #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc,
+        else fprintf(stderr, "  #%-2d %016llx UltraTears+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
     }
 }
