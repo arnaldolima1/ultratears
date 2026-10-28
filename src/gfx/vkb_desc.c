@@ -47,6 +47,12 @@ typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; VkDeviceSize si
 static dmem_t g_mem[VKB_SLOTS][VKB_MAXREC];
 static dmem_t g_old[VKB_SLOTS][VKB_MAXREC][8];   // replaced during a submission: freed when the slot comes round again
 static int g_nold[VKB_SLOTS][VKB_MAXREC];
+// The memory starts at DMEM_MIN and doubles when a submission needs more; when a slot and thread used under a quarter
+// of it over DMEM_TRIM of the slot's submissions, it is freed and made again at twice that use. Before: 16 MiB and up
+// per slot and recording thread, kept for good - 448 MiB after a load and a run (2026-10-28, L7).
+enum { DMEM_MIN = 2u << 20, DMEM_TRIM = 120 };
+typedef struct { VkDeviceSize peak, want; int resets; } dtrim_t;
+static dtrim_t g_trim[VKB_SLOTS][VKB_MAXREC];
 static __thread uint64_t g_gen = 1;   // changes whenever this thread's memory changes (offsets made before are void)
 static __thread uint64_t g_bound_rec, g_bound_gen;
 static uint32_t g_type = UINT32_MAX;   // the same answer whichever thread finds it
@@ -69,6 +75,7 @@ static int dmem_new(dmem_t *m, VkDeviceSize size) {
     }
     VkMemoryAllocateFlagsInfo fl = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fl, .allocationSize = req.size, .memoryTypeIndex = g_type};
+    vkb_mtag = MT_DESC;
     if (g_type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &m->mem), "descriptor memory")) {
         vk.vkDestroyBuffer(vkc.device, m->buf, NULL);
         return 0;
@@ -88,9 +95,22 @@ static void dmem_free(dmem_t *m) {
 }
 void vkb_db_slot_reset(int slot) {   // the slot's previous submission is complete
     for (int w = 0; w < VKB_MAXREC; w++) {
-        for (int i = 0; i < g_nold[slot][w]; i++) dmem_free(&g_old[slot][w][i]);
+        dmem_t *m = &g_mem[slot][w];
+        dtrim_t *t = &g_trim[slot][w];
+        VkDeviceSize used = m->used;   // the submission's use, memories replaced during it included
+        for (int i = 0; i < g_nold[slot][w]; i++) { used += g_old[slot][w][i].used; dmem_free(&g_old[slot][w][i]); }
         g_nold[slot][w] = 0;
-        g_mem[slot][w].used = 0;
+        if (used > t->peak) t->peak = used;
+        m->used = 0;
+        if (++t->resets >= DMEM_TRIM) {
+            VkDeviceSize keep = t->peak * 2 > DMEM_MIN ? t->peak * 2 : DMEM_MIN;
+            if (m->buf && m->size > keep * 2) {   // no submission uses it (the slot's last one is done)
+                dmem_free(m);   // made again on the next draw of this slot and thread (vkb_db_set binds it anew)
+                t->want = keep;
+            }
+            t->peak = 0;
+            t->resets = 0;
+        }
     }
 }
 uint64_t vkb_db_gen(void) { return g_gen; }
@@ -173,7 +193,7 @@ VkDeviceSize vkb_db_set(VkCommandBuffer cb, int slot, uint64_t rec, const VkWrit
     VkDeviceSize a = vkc.db.descriptorBufferOffsetAlignment ? vkc.db.descriptorBufferOffsetAlignment : 64;
     VkDeviceSize at = (m->used + a - 1) & ~(a - 1);
     if (!m->buf || at + g_size[compute] > m->size) {   // more memory: the old one stays until the slot's submission is done
-        VkDeviceSize size = m->size ? m->size * 2 : 16u << 20;
+        VkDeviceSize size = m->size ? m->size * 2 : g_trim[slot][wk].want ? g_trim[slot][wk].want : DMEM_MIN;
         VkDeviceSize cap = vkc.db.maxResourceDescriptorBufferRange < vkc.db.maxSamplerDescriptorBufferRange
                          ? vkc.db.maxResourceDescriptorBufferRange : vkc.db.maxSamplerDescriptorBufferRange;
         if (cap && size > cap) size = cap;
