@@ -315,6 +315,19 @@ static void title_update(void) {
     t0 = now; game0 = game; shown0 = shown; gpu0 = gpu;
 }
 
+// Hang watchdog: no game frame for 3 s (and again at 10 s) with the game started: every thread's stack goes into the
+// log (profiler.c), to tell where a freeze is stuck.
+static void hang_watch(void) {
+#ifdef _WIN32
+    static uint64_t last_frames, since;
+    static int told;
+    uint64_t f = vkp_frames(), now = SDL_GetTicksNS();
+    if (f != last_frames || !vkp_game_shown() || hidden_until_frame) { last_frames = f; since = now; told = 0; return; }
+    if (told < 1 && now - since > 3000000000ull) { told = 1; runtime_dump_stacks("no game frame for 3 s"); }
+    if (told < 2 && now - since > 10000000000ull) { told = 2; runtime_dump_stacks("no game frame for 10 s"); }
+#endif
+}
+
 // F1: the panel takes the mouse (free cursor) until it closes, then the camera has it again.
 static void panel_toggle(int on) {
     ovl_panel_set(on);
@@ -429,5 +442,6 @@ _Noreturn void window_loop(void) {
         if (act & OVL_ACT_CLOSE) panel_toggle(0);
         if (pad) pad_update();
         title_update();
+        hang_watch();
     }
 }

@@ -190,6 +190,70 @@ uint64_t runtime_symbolize(uint64_t rip, char *out, size_t n) {
     return describe(proc, rip, out, n);
 }
 
+// The hang watchdog's report (window_sdl.c): every other thread's stack, named. The stacks are read with the threads
+// suspended (only their registers and stack memory), and named once all are running again: naming takes locks
+// (dbghelp, the heap) that a suspended thread may hold.
+#define DUMP_DEPTH 20
+void runtime_dump_stacks(const char *why) {
+    static uint64_t rips[MAX_THREADS][DUMP_DEPTH];
+    static DWORD ids[MAX_THREADS];
+    static int depth[MAX_THREADS];
+    unsigned n = 0;
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te = {sizeof te};
+    for (BOOL ok = Thread32First(snap, &te); ok && n < MAX_THREADS; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        if (SuspendThread(h) != (DWORD)-1) {
+            CONTEXT ctx = {.ContextFlags = CONTEXT_FULL};
+            int d = 0;
+            if (GetThreadContext(h, &ctx))
+                for (uint64_t rip = ctx.Rip; d < DUMP_DEPTH && rip; rip = ctx.Rip) {
+                    rips[n][d++] = rip;
+                    DWORD64 base;
+                    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(rip, &base, NULL);
+                    if (fe) {
+                        void *hd; DWORD64 fr;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, rip, fe, &ctx, &hd, &fr, NULL);
+                    } else {   // a leaf function: the return address is on top of the stack
+                        ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp;
+                        ctx.Rsp += 8;
+                    }
+                }
+            ResumeThread(h);
+            ids[n] = te.th32ThreadID;
+            depth[n++] = d;
+        }
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    HANDLE proc = GetCurrentProcess();
+    sym_init(proc);
+    typedef HRESULT (WINAPI *get_desc_t)(HANDLE, PWSTR *);   // GetThreadDescription (Windows 10 1607+)
+    get_desc_t get_desc = (get_desc_t)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    fprintf(stderr, "[totk] ==== thread stacks (%s): %u threads ====\n", why, n);
+    for (unsigned t = 0; t < n; t++) {
+        char name[64] = "";
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, ids[t]);
+        PWSTR w = NULL;
+        if (h && get_desc && SUCCEEDED(get_desc(h, &w)) && w) {
+            WideCharToMultiByte(CP_UTF8, 0, w, -1, name, sizeof name, NULL, NULL);
+            LocalFree(w);
+        }
+        if (h) CloseHandle(h);
+        fprintf(stderr, "[totk] thread %lu %s\n", (unsigned long)ids[t], name);
+        for (int d = 0; d < depth[t]; d++) {
+            char fn[512];
+            describe(proc, rips[t][d], fn, sizeof fn);
+            fprintf(stderr, "[totk]     %s\n", fn);
+        }
+    }
+    fflush(stderr);
+}
+
 static void report(const char *path, double seconds) {
     HANDLE proc = GetCurrentProcess();
     sym_init(proc);

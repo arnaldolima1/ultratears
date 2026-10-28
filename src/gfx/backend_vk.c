@@ -629,17 +629,64 @@ enum { CKPT_RING = 1 << 16 };
 typedef struct { uint64_t frame; uint32_t n; const char *what; char k1[32], k2[32]; } ckpt_t;
 static ckpt_t *g_ckpt;
 static _Atomic uint32_t g_ckpt_n;
+// AMD (VK_AMD_buffer_marker, no NV checkpoints): each checkpoint writes its number into a host-visible buffer when the
+// GPU starts the command after it (top of pipe, word 0) and, at the next checkpoint of the thread, once everything
+// before has finished (bottom of pipe, word 1); after a lost device the two words name the commands in flight.
+static VkBuffer g_mk_buf;
+static volatile uint32_t *g_mk;
+static void markers_init(void) {
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 64, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VkMemoryRequirements req;
+    VkDeviceMemory mem;
+    void *map = NULL;
+    if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_mk_buf), "marker buffer")) return;
+    vk.vkGetBufferMemoryRequirements(vkc.device, g_mk_buf, &req);
+    uint32_t type = UINT32_MAX;
+    VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < vkc.memory.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((req.memoryTypeBits >> i & 1) && (vkc.memory.memoryTypes[i].propertyFlags & want) == want) type = i;
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+    if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &mem), "marker memory") ||
+        !vk_check(vk.vkBindBufferMemory(vkc.device, g_mk_buf, mem, 0), "marker bind") ||
+        !vk_check(vk.vkMapMemory(vkc.device, mem, 0, VK_WHOLE_SIZE, 0, &map), "marker map")) { g_mk_buf = VK_NULL_HANDLE; return; }
+    g_mk = map;
+    g_mk[0] = g_mk[1] = 0;
+    VLOG("GPU markers (VK_AMD_buffer_marker): on");
+}
 void vkb_checkpoint(const char *what, const char *k1, const char *k2) {
-    if (!vkc.has_checkpoints) return;
+    if (!vkc.has_checkpoints && !vkc.has_markers) return;
     if (!g_ckpt && !(g_ckpt = calloc(CKPT_RING, sizeof *g_ckpt))) return;
     uint32_t n = atomic_fetch_add(&g_ckpt_n, 1), i = n % CKPT_RING;
     ckpt_t *c = &g_ckpt[i];
     c->frame = vkb_frame(); c->n = n; c->what = what;
     snprintf(c->k1, sizeof c->k1, "%s", k1 ? k1 : "-");
     snprintf(c->k2, sizeof c->k2, "%s", k2 ? k2 : "-");
-    vk.vkCmdSetCheckpointNV(vkb_cmd(), (void *)(uintptr_t)(i + 1));
+    if (vkc.has_checkpoints) { vk.vkCmdSetCheckpointNV(vkb_cmd(), (void *)(uintptr_t)(i + 1)); return; }
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, markers_init);
+    if (!g_mk_buf) return;
+    static __thread uint32_t prev;   // this thread's previous checkpoint: done once all before this one is
+    VkCommandBuffer cb = vkb_cmd();
+    if (prev) vk.vkCmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_mk_buf, 4, prev);
+    vk.vkCmdWriteBufferMarkerAMD(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_mk_buf, 0, i + 1);
+    prev = i + 1;
 }
-static void checkpoint_report(void) {
+static void markers_report(void) {
+    if (!g_mk || !g_ckpt) return;
+    uint32_t top = g_mk[0], done = g_mk[1];
+    VLOG("device lost: GPU markers: last started #%u, last finished #%u (%u recorded)", top, done, (unsigned)atomic_load(&g_ckpt_n));
+    for (uint32_t m = done; m && m <= CKPT_RING; m = 0) {
+        const ckpt_t *c = &g_ckpt[m - 1];
+        VLOG("  finished: #%u present %llu %s %s %s", c->n, (unsigned long long)c->frame, c->what, c->k1, c->k2);
+    }
+    if (top && top <= CKPT_RING) {
+        for (uint32_t k = 0; k < 8; k++) {   // the started one and those recorded right after it (in flight with it)
+            const ckpt_t *c = &g_ckpt[(top - 1 + k) % CKPT_RING];
+            VLOG("  %s #%u present %llu %s %s %s", k ? "after:   " : "started: ", c->n, (unsigned long long)c->frame, c->what, c->k1, c->k2);
+        }
+    }
+}static void checkpoint_report(void) {
+    markers_report();
     if (!vkc.has_checkpoints || !g_ckpt) return;
     VkCheckpointDataNV d[16];
     uint32_t n = 16;
@@ -1645,7 +1692,7 @@ uint64_t mtl_sub_commit(void) {
     VkResult r = vk.vkQueueSubmit2(vkc.queue, 1, &si, VK_NULL_HANDLE);
     vk_queue_unlock();
     vkb_step_add(PK_SUBMIT, ts0);
-    if (r != VK_SUCCESS) { vk_check(r, "vkQueueSubmit2"); die("GPU submission failed"); }
+    if (r != VK_SUCCESS) { vk_check(r, "vkQueueSubmit2"); checkpoint_report(); die("GPU submission failed"); }
     job *j = malloc(sizeof *j);
     if (!j) die("retire job");
     *j = (job){fence, ops, n, g_cur, g_wb_ranges, g_wb_nranges, NULL};   // g_wb_ranges: in the slot's copy back memory
