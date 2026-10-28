@@ -163,6 +163,7 @@ static void memory_log(void) {
          "host %.0f MiB (peak %.0f); game memory imported %.0f MiB", drv[0] ? drv : " -", atomic_load(&g_mem_bytes[MK_DEVICE]) / 1048576.0,
          (unsigned long long)atomic_load(&g_mem_count[MK_DEVICE]), atomic_load(&g_mem_peak[MK_DEVICE]) / 1048576.0, vkb_shadow_bytes() / 1048576.0,
          atomic_load(&g_mem_bytes[MK_HOST]) / 1048576.0, atomic_load(&g_mem_peak[MK_HOST]) / 1048576.0, atomic_load(&g_mem_bytes[MK_IMPORT]) / 1048576.0);
+    vkb_shader_report();
     void plat_memory_map(void);   // runtime/platform.h
     static int map = -1;
     if (map < 0) map = getenv("TOTK_MEMMAP") != NULL;
@@ -1038,18 +1039,27 @@ static void checkpoint_report(void) {
 // the device was lost (TOTK's item-get screen, 2026-10-24). Now each waits for the first submission after it was given up.
 // Deleted memory pools' imports too (mtl_pool_del): another game thread's submission, recorded while the pool was being
 // deleted, brought the copies of recently used pools up to date from it (2026-10-27, L16).
-typedef struct dead { uint64_t fence; VkImageView view; VkImage img; VkDeviceMemory mem; VkBuffer buf; struct dead *next; } dead;
+typedef struct dead { uint64_t fence; VkImageView view; VkImage img; VkDeviceMemory mem; VkBuffer buf; VkShaderEXT sh; struct dead *next; } dead;
 static dead *g_dead_new, *g_dead;   // given up since the last submission (no fence yet) / waiting for their fence
 static pthread_mutex_t g_dead_mu = PTHREAD_MUTEX_INITIALIZER;
 static void destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem, VkBuffer buf) {
     dead *d = malloc(sizeof *d);
     if (!d) die("deferred destruction");
-    *d = (dead){0, view, img, mem, buf, NULL};
+    *d = (dead){0, view, img, mem, buf, VK_NULL_HANDLE, NULL};
     pthread_mutex_lock(&g_dead_mu);
     d->next = g_dead_new; g_dead_new = d;
     pthread_mutex_unlock(&g_dead_mu);
 }
 void vkb_destroy_later(VkImageView view, VkImage img, VkDeviceMemory mem) { destroy_later(view, img, mem, VK_NULL_HANDLE); }
+// A shader object no program holds any more (vkb_shader.c): the submission being recorded may still bind it.
+void vkb_destroy_shader_later(VkShaderEXT sh) {
+    dead *d = malloc(sizeof *d);
+    if (!d) die("deferred destruction");
+    *d = (dead){0, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, sh, NULL};
+    pthread_mutex_lock(&g_dead_mu);
+    d->next = g_dead_new; g_dead_new = d;
+    pthread_mutex_unlock(&g_dead_mu);
+}
 static void dead_tag(uint64_t fence) {   // a submission: what was given up so far waits for it
     pthread_mutex_lock(&g_dead_mu);
     while (g_dead_new) { dead *d = g_dead_new; g_dead_new = d->next; d->fence = fence; d->next = g_dead; g_dead = d; }
@@ -1064,6 +1074,7 @@ static void dead_reap(uint64_t done) {   // the GPU finished up to `done`
     pthread_mutex_unlock(&g_dead_mu);
     while (free_list) {
         dead *d = free_list; free_list = d->next;
+        if (d->sh) vk.vkDestroyShaderEXT(vkc.device, d->sh, NULL);
         if (d->view) vk.vkDestroyImageView(vkc.device, d->view, NULL);
         if (d->img) vk.vkDestroyImage(vkc.device, d->img, NULL);
         if (d->buf) vk.vkDestroyBuffer(vkc.device, d->buf, NULL);

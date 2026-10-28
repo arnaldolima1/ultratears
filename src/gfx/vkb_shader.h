@@ -52,3 +52,11 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *vs, uint32_t intmask, uint32_t 
 VkDescriptorSetLayout vkb_set_layout(int compute);
 VkPipelineLayout vkb_pipeline_layout(int compute);
 void vkb_shader_stats(uint64_t *loaded, uint64_t *missing);
+void vkb_shader_report(void);   // the memory log line: shader objects, programs, binaries on disk, compiled ahead
+// Shader objects follow the game's programs (vkb_shader.c): set holds the program's shaders and returns what it held
+// before; drop (ProgramFinalize) returns what it held; release, called from the translation queue after the commands
+// queued before it, lets go of them. NULL: nothing to release.
+typedef struct vkb_shader_rel vkb_shader_rel;
+vkb_shader_rel *vkb_shader_prog_set(const void *prog, int n, const NVNshaderData *sd);
+vkb_shader_rel *vkb_shader_prog_drop(const void *prog);
+void vkb_shader_release(vkb_shader_rel *rel);

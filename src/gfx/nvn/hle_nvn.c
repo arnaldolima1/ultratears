@@ -617,13 +617,19 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
 // No wait for the queue (it took ~4 ms a time on the way through the world): queued commands use the frozen copy.
-NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; }
+// Shader objects follow the programs (vkb_shader.c): a program set holds its shaders; what a program held is let go of
+// through the translation queue (x_shrel), after the commands queued with it.
+void *vkb_shader_prog_set(const void *prog, int n, const NVNshaderData *sd);
+void *vkb_shader_prog_drop(const void *prog);
+void x_shrel(void *rel);
+NVN(nvnProgramFinalize, void, NVNprogram *p) { x_shrel(vkb_shader_prog_drop(p)); mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; }
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     NVN_BLOCKING();
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[error] ProgramSetShaders: %d stages", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     for (int i = 0; i < n; i++) o->sd[i].data = nvn_va2cpu(o->sd[i].data);   // the code's GPU address: where it is for the CPU
+    x_shrel(vkb_shader_prog_set(p, n, o->sd));
     prog_t *f = malloc(sizeof *f);   // [temporary] kept for good: ~120 bytes per SetShaders (free them by the retire fence later)
     if (!f) die("program copy");
     *f = *o; f->frozen = f;
@@ -2005,8 +2011,8 @@ _Atomic int dm_submit_busy;   // TOTK diagnostic: submissions being replayed (ru
 //    suspend) wait until the queue is empty first (x_drain), so they never overtake a queued replay that still uses them.
 // TOTK_ASYNC_REPLAY=0 runs everything on the calling thread as before. [Windows port] On by default since 2026-10-24: with
 // the Vulkan replay on the game's thread the Great Sky Island ran at ~95 ms a frame, with this thread at ~58 ms.
-enum { XJ_SUBMIT = 1, XJ_PRESENT, XJ_TEXREL };
-typedef struct { int kind, n; uint64_t *h; void *ucap; win_t *win; int idx; double period; int crop[4]; uint64_t frame, sub; tex_t tex; } xjob;   // tex: copy of a finalized texture (XJ_TEXREL); ucap: uniforms captured at the submit call
+enum { XJ_SUBMIT = 1, XJ_PRESENT, XJ_TEXREL, XJ_SHREL };
+typedef struct { int kind, n; uint64_t *h; void *ucap; win_t *win; int idx; double period; int crop[4]; uint64_t frame, sub; tex_t tex; } xjob;   // tex: copy of a finalized texture (XJ_TEXREL); ucap: uniforms captured at the submit call, or the shaders a program let go of (XJ_SHREL)
 #define XQ 64
 #define XF 4096
 static xjob g_xq[XQ];
@@ -2032,6 +2038,7 @@ static void *x_thread(void *unused) {
         pthread_mutex_unlock(&g_xq_mu);
         if (j.kind == XJ_SUBMIT) { submit_exec(j.n, j.h, j.ucap); free(j.h); }
         else if (j.kind == XJ_TEXREL) { void live_del_x(const tex_t *o); live_del_x(&j.tex); mtl_tex_release(&j.tex); }
+        else if (j.kind == XJ_SHREL) { void vkb_shader_release(void *rel); vkb_shader_release(j.ucap); }
         else {
             // Real-time like the game's render thread that used to replay (set at acquire): otherwise the game's ~50
             // worker threads preempt the replay (measured: replay 6.6 -> 13 ms, 10 fps). Half the period is declared.
@@ -2063,6 +2070,12 @@ static uint64_t x_push(xjob *j) {   // returns the job number (1-based)
     return no;
 }
 void x_texrel(const tex_t *o) { xjob j = {.kind = XJ_TEXREL}; j.tex = *o; x_push(&j); }
+void x_shrel(void *rel) {   // after the submissions queued so far (at once when replaying on the calling thread)
+    if (!rel) return;
+    if (!async_replay()) { void vkb_shader_release(void *r); vkb_shader_release(rel); return; }
+    xjob j = {.kind = XJ_SHREL, .ucap = rel};
+    x_push(&j);
+}
 void x_start(void) {
     pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20);
     pthread_attr_set_qos_class_np(&a, QOS_CLASS_USER_INTERACTIVE, 0);

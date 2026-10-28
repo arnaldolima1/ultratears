@@ -22,6 +22,7 @@
 #include "vkb.h"
 #include "vkb_shader.h"
 #include "vkb_spv.h"
+#include "vkb_shbin.h"
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
 
@@ -106,11 +107,9 @@ static char *read_file(const char *path, size_t *n) {
     return b;
 }
 
-// ---------------- shaders by key ----------------
-typedef struct shentry { char key[65]; int c1_set, prewarmed; vkb_shader sh; struct shentry *next; } shentry;   // prewarmed: made ahead (prewarm_thread)
-static shentry *g_tab[4096];
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_loaded, g_missing;
+// ---------------- shaders by key (the entries: below, with the objects' lifetime) ----------------
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;   // the entries, their objects and variants, the programs
+static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;     // an entry no longer busy
 
 static BCRYPT_ALG_HANDLE g_sha;   // opened once (opening it per hash cost more than the hash)
 static void sha_open(void) { if (BCryptOpenAlgorithmProvider(&g_sha, BCRYPT_SHA256_ALGORITHM, NULL, 0)) die("SHA-256 provider"); }
@@ -165,13 +164,44 @@ static size_t drop_cull_distance(uint32_t *w, size_t n) {
     return o;
 }
 
-static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, size_t bytes, VkShaderEXT *obj) {
+// ---- shader objects: from the driver's binary on disk when there is one (vkb_shbin.c), else compiled from SPIR-V
+// and its binary kept
+static _Atomic uint64_t g_from_bin, g_from_spv, g_bin_refused, g_obj_live, g_obj_destroyed;
+static VkResult make_object(const char *key, const vkb_shbin_variant *v, VkShaderStageFlagBits stage, const uint32_t *spv,
+                            size_t bytes, VkShaderEXT *obj) {
     VkDescriptorSetLayout layout = vkb_set_layout(stage == VK_SHADER_STAGE_COMPUTE_BIT);
     VkShaderCreateInfoEXT ci = {VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT, .stage = stage,
         .nextStage = stage == VK_SHADER_STAGE_VERTEX_BIT ? VK_SHADER_STAGE_FRAGMENT_BIT : 0,
         .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT, .codeSize = bytes, .pCode = spv, .pName = "main",
         .setLayoutCount = 1, .pSetLayouts = &layout};
-    return vk.vkCreateShadersEXT(vkc.device, 1, &ci, NULL, obj);
+    void *bin;
+    size_t nbin;
+    if (key && vkb_shbin_get(key, v, &bin, &nbin)) {
+        VkShaderCreateInfoEXT bi = ci;
+        bi.codeType = VK_SHADER_CODE_TYPE_BINARY_EXT; bi.codeSize = nbin; bi.pCode = bin;
+        VkResult r = vk.vkCreateShadersEXT(vkc.device, 1, &bi, NULL, obj);
+        free(bin);
+        if (r == VK_SUCCESS) { atomic_fetch_add(&g_from_bin, 1); atomic_fetch_add(&g_obj_live, 1); return r; }
+        vkb_shbin_drop(key, v);   // refused (VK_INCOMPATIBLE_SHADER_BINARY_EXT): compiled again below and kept anew
+        atomic_fetch_add(&g_bin_refused, 1);
+    }
+    VkResult r = vk.vkCreateShadersEXT(vkc.device, 1, &ci, NULL, obj);
+    if (r != VK_SUCCESS) return r;
+    atomic_fetch_add(&g_from_spv, 1);
+    atomic_fetch_add(&g_obj_live, 1);
+    size_t n = 0;
+    if (key && vk.vkGetShaderBinaryDataEXT(vkc.device, *obj, &n, NULL) == VK_SUCCESS && n) {
+        void *d = malloc(n);
+        if (d && vk.vkGetShaderBinaryDataEXT(vkc.device, *obj, &n, d) == VK_SUCCESS) vkb_shbin_put(key, v, d, n);
+        free(d);
+    }
+    return r;
+}
+static void drop_object(VkShaderEXT o) {   // no submission uses it any more once the next one is done
+    void vkb_destroy_shader_later(VkShaderEXT sh);   // backend_vk.c
+    vkb_destroy_shader_later(o);
+    atomic_fetch_sub(&g_obj_live, 1);
+    atomic_fetch_add(&g_obj_destroyed, 1);
 }
 
 // TOTK_VK_FILL_OUTPUTS=0: no outputs added for fragment inputs the vertex shader does not write (A/B).
@@ -183,8 +213,8 @@ static int fill_outputs_on(void) {
 
 // A vertex shader for integer attributes at the locations in intmask (signed where sintmask has the bit): those
 // inputs read the raw bits; and, drawn with fs, with outputs (0, 0, 0, 1) at the fragment inputs it does not write
-// (vkb_spv.c). Made on first use and kept; nothing to change gives the shader itself.
-// [temporary] made during play (a compile on first use); the variant list and building ahead of time - phase 5.
+// (vkb_spv.c). Made on first use (from its binary when there is one) and kept while the shader lives; nothing to change
+// gives the shader itself.
 VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t sintmask, const vkb_shader *fs) {
     vkb_shader *s = (vkb_shader *)cs;
     intmask &= s->in_mask;
@@ -220,7 +250,8 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t 
             FILE *f = fopen(path, "wb");
             if (f) { fwrite(spv, 4, nw, f); fclose(f); }
         }
-        if (create_object(VK_SHADER_STAGE_VERTEX_BIT, spv, nw * 4, &obj) != VK_SUCCESS) obj = VK_NULL_HANDLE;
+        vkb_shbin_variant id = {{intmask, sintmask, outmask, out_umask, out_imask}};
+        if (make_object(s->key, &id, VK_SHADER_STAGE_VERTEX_BIT, spv, nw * 4, &obj) != VK_SUCCESS) obj = VK_NULL_HANDLE;
     }
     free(a);
     free(b);
@@ -235,13 +266,15 @@ VkShaderEXT vkb_shader_variant(const vkb_shader *cs, uint32_t intmask, uint32_t 
     if (!ints_ok && said++ < 8) VLOG("[temporary] shader %.12s: no variant for integer inputs %#x: the float reading stays", s->key ? s->key : "?", intmask);
     if (!outs_ok && said++ < 8) VLOG("[temporary] shader %.12s: outputs %#x not added: fragment inputs read undefined values", s->key ? s->key : "?", outmask);
     pthread_mutex_lock(&g_mu);
-    if (s->nvariants < VKB_VARIANTS) s->variants[s->nvariants++] = (vkb_variant){intmask, sintmask, outmask, out_umask, out_imask, obj};
+    if (s->obj && s->nvariants < VKB_VARIANTS) s->variants[s->nvariants++] = (vkb_variant){intmask, sintmask, outmask, out_umask, out_imask, obj};
+    else if (obj != s->obj) { pthread_mutex_unlock(&g_mu); drop_object(obj); return s->obj; }   // released meanwhile
     pthread_mutex_unlock(&g_mu);
     return obj;
 }
 
-// Reads the reflection, rewrites the SPIR-V bindings into the universal layout, creates the shader object.
-static int load(vkb_shader *s, const char *key, int nvn_stage) {
+// Reads the reflection into s and rewrites the SPIR-V bindings into the universal layout: *spv_out (malloc) of
+// *bytes. The shader object is made by the caller.
+static int load_module(vkb_shader *s, const char *key, int nvn_stage, uint32_t **spv_out, size_t *bytes) {
     char path[1024];
     snprintf(path, sizeof path, "%s/%s.res.json", cache_dir(), key);
     char *j = read_file(path, NULL);
@@ -325,134 +358,306 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
         }
         i += wc;
     }
-    VkShaderStageFlagBits stage = nvn_stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : nvn_stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
-    VkResult r = create_object(stage, spv, nspv, &s->obj);
-    if (r == VK_SUCCESS) {   // input / output locations: vertex variants; fragment inputs no vertex shader writes (audit)
-        s->in_mask = vkb_spv_input_mask(spv, nspv / 4);
-        s->out_mask = vkb_spv_output_mask(spv, nspv / 4);
-        vkb_spv_input_int_masks(spv, nspv / 4, &s->in_umask, &s->in_imask);
-        uint32_t reads = vkb_spv_sbuf_reads(spv, nspv / 4, base + VKB_B_SBUF, s->nsbuf);
-        for (int i = 0; i < s->nsbuf; i++) s->sbuf[i].read = (uint8_t)(reads >> i & 1);
-    }
-    if (stage == VK_SHADER_STAGE_VERTEX_BIT && r == VK_SUCCESS) {   // kept for attribute variants (vkb_shader_variant)
-        s->spv = spv;
-        s->nspv_words = nspv / 4;
-    } else free(spv);
-    if (r != VK_SUCCESS) { VLOG("shader %s: vkCreateShadersEXT %d", key, (int)r); return 0; }
-    if (getenv("TOTK_VK_VALIDATION")) VLOG("shader %.12s = VkShaderEXT %#llx", key, (unsigned long long)(uintptr_t)s->obj);   // names validation messages
-    s->vk_stage = stage;
+    // input / output locations: vertex variants; fragment inputs no vertex shader writes (audit)
+    s->in_mask = vkb_spv_input_mask(spv, nw);
+    s->out_mask = vkb_spv_output_mask(spv, nw);
+    vkb_spv_input_int_masks(spv, nw, &s->in_umask, &s->in_imask);
+    uint32_t reads = vkb_spv_sbuf_reads(spv, nw, base + VKB_B_SBUF, s->nsbuf);
+    for (int i = 0; i < s->nsbuf; i++) s->sbuf[i].read = (uint8_t)(reads >> i & 1);
+    s->vk_stage = nvn_stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : nvn_stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    *spv_out = spv;
+    *bytes = nspv;
     return 1;
 }
 
-// ---- shaders made ahead: creating a shader object compiles it in the driver, ~17% of the recording thread on the way
-// into the world, where new shaders arrive in bursts (submissions held up to 2.3 s, Great Sky Island, 2026-10-24).
-// Every shader loaded is listed (<cache>/used.txt: key and NVN stage, appended); at the first shader lookup of a run,
-// PREWARM_THREADS low-priority threads create the listed ones that are not loaded yet. The first run fills the list;
-// later runs find those shaders made (as SavageWind's pipeline list). The constants c1 come from the game's program
-// at the first real lookup (c1_set).
-enum { PREWARM_THREADS = 2 };
-static uint64_t g_prewarm_made, g_prewarm_hits;
-uint64_t vkb_shader_load_ns;   // shaders made when first drawn with (long submission log, backend_vk.c)
-static char *g_list;   // used.txt, read once
-static size_t g_list_n;
-static _Atomic size_t g_list_at;
-static void list_add(const char *key, int stage) {   // g_mu held
-    char path[1024];
-    snprintf(path, sizeof path, "%s/used.txt", cache_dir());
-    FILE *f = fopen(path, "ab");
-    if (!f) return;
-    fprintf(f, "%s %d\n", key, stage);
-    fclose(f);
+// ---- shader objects follow the game's programs. On the Switch a shader costs the game only its code, and TOTK keeps
+// the programs of where Link is - ~6 000-7 000 shaders - and finalizes those of places left behind (a 20-minute session
+// with teleports, 2026-10-28: 8 394 shaders seen, at most 6 946 held by live programs). A shader object costs the
+// driver ~0.13 MiB, so objects kept for good (as the used.txt list made ahead did) grow with the time played, towards
+// all 28 687 shaders (~3.5 GiB). Now:
+//  - a program set (ProgramSetShaders, on the game's thread) holds its shaders; one not made yet is made by the creator
+//    threads from its binary (~1 ms) - most programs are set seconds before their first draw;
+//  - a program finalized or set again lets go of its shaders through the translation queue (vkb_shader_prog_drop ->
+//    vkb_shader_release), after the submissions queued before it; a shader no program holds is destroyed once the
+//    next submission is done (vkb_destroy_shader_later);
+//  - a draw with a shader whose object is not there yet makes it at once (or waits for the creator making it);
+//  - all of the game's translated shaders are compiled ahead, once per driver, into the binary file (ahead_thread).
+// TOTK_SHADER_AHEAD=0: no compiling ahead.
+typedef struct shentry {
+    char key[65];
+    int c1_set, stage;
+    int loaded;   // 0 the reflection not read yet, 1 read, -1 no translation
+    int busy;     // a thread is making the object (others wait on g_cv)
+    int refs;     // live programs holding the shader
+    int queued;   // waiting for a creator thread
+    vkb_shader sh;
+    struct shentry *next;
+} shentry;
+static shentry *g_tab[4096];
+static uint64_t g_loaded, g_missing;
+uint64_t vkb_shader_load_ns;   // objects made by draws (long submission log, backend_vk.c)
+
+static shentry *entry(const char *key, int stage) {   // g_mu held: the entry of key, added if new
+    uint32_t h = (uint32_t)strtoul(key + 56, NULL, 16) & 4095;
+    shentry *e = g_tab[h];
+    while (e && strcmp(e->key, key)) e = e->next;
+    if (e) return e;
+    if (!(e = calloc(1, sizeof *e))) die("shader entry");
+    memcpy(e->key, key, 65);
+    e->sh.key = e->key;
+    e->stage = stage;
+    e->next = g_tab[h];
+    g_tab[h] = e;
+    return e;
 }
-static void *prewarm_thread(void *unused) {
-    (void)unused;
-    pthread_setname_np("totk-shader-prewarm");
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    for (;;) {
-        size_t at = atomic_fetch_add(&g_list_at, 67);   // one line: 64 hex digits, space, stage, newline (67 bytes)
-        if (at + 67 > g_list_n) break;
-        const char *l = g_list + at;
-        if (l[64] != ' ' || l[66] != '\n') continue;
-        char key[65];
-        memcpy(key, l, 64); key[64] = 0;
-        int stage = l[65] - '0';
-        uint32_t h = (uint32_t)strtoul(key + 56, NULL, 16) & 4095;
-        pthread_mutex_lock(&g_mu);
-        shentry *e = g_tab[h];
-        while (e && strcmp(e->key, key)) e = e->next;
-        pthread_mutex_unlock(&g_mu);
-        if (e) continue;
-        shentry *n = calloc(1, sizeof *n);
-        if (!n) die("shader entry");
-        memcpy(n->key, key, sizeof key);
-        n->sh.key = n->key;
-        if (!load(&n->sh, key, stage)) { free(n); continue; }
-        n->prewarmed = 1;
-        pthread_mutex_lock(&g_mu);
-        e = g_tab[h];
-        while (e && strcmp(e->key, key)) e = e->next;
-        if (!e) { n->next = g_tab[h]; g_tab[h] = n; g_prewarm_made++; g_loaded++; }
-        pthread_mutex_unlock(&g_mu);
-        if (e) { vk.vkDestroyShaderEXT(vkc.device, n->sh.obj, NULL); free(n->sh.spv); free(n); }   // loaded meanwhile
+
+// g_mu held (released while working): the entry's object, made here or by another thread. 0: no translation.
+static int ensure(shentry *e, int on_draw) {
+    while (e->busy) pthread_cond_wait(&g_cv, &g_mu);
+    if (e->sh.obj) return 1;
+    if (e->loaded < 0) return 0;
+    e->busy = 1;
+    int first = !e->loaded;
+    pthread_mutex_unlock(&g_mu);
+    uint64_t t0 = runtime_now_ns();
+    vkb_shader again;   // a shader made again: the reflection is kept, this read of it is dropped
+    memset(&again, 0, sizeof again);
+    uint32_t *spv = NULL;
+    size_t bytes = 0;
+    int ok = load_module(first ? &e->sh : &again, e->key, e->stage, &spv, &bytes);
+    VkShaderEXT obj = VK_NULL_HANDLE;
+    VkShaderStageFlagBits st = first ? e->sh.vk_stage : again.vk_stage;
+    if (ok) {
+        VkResult r = make_object(e->key, &(vkb_shbin_variant){{0}}, st, spv, bytes, &obj);
+        if (r != VK_SUCCESS) { VLOG("shader %s: vkCreateShadersEXT %d", e->key, (int)r); ok = 0; }
     }
-    static _Atomic int left = PREWARM_THREADS;
-    if (atomic_fetch_sub(&left, 1) == 1) VLOG("shaders made ahead from the list: %llu", (unsigned long long)g_prewarm_made);
+    if (ok && getenv("TOTK_VK_VALIDATION")) VLOG("shader %.12s = VkShaderEXT %#llx", e->key, (unsigned long long)(uintptr_t)obj);   // names validation messages
+    pthread_mutex_lock(&g_mu);
+    if (ok) {
+        e->sh.obj = obj;
+        e->loaded = 1;
+        if (st == VK_SHADER_STAGE_VERTEX_BIT) { e->sh.spv = spv; e->sh.nspv_words = bytes / 4; spv = NULL; }   // for variants
+        if (first) g_loaded++;
+    } else if (first) {
+        e->loaded = -1;
+        if (g_missing++ < 16) VLOG("shader %s (stage %d): no translation in %s", e->key, e->stage, cache_dir());
+    }
+    free(spv);
+    if (on_draw) vkb_shader_load_ns += runtime_now_ns() - t0;
+    e->busy = 0;
+    pthread_cond_broadcast(&g_cv);
+    return ok;
+}
+
+// g_mu held: a program let go of the shader; with no program left, its objects go once the next submission is done.
+static void unref(shentry *e) {
+    if (--e->refs > 0 || e->busy || !e->sh.obj) return;
+    VkShaderEXT obj = e->sh.obj;
+    for (int i = 0; i < e->sh.nvariants; i++) if (e->sh.variants[i].obj != obj) drop_object(e->sh.variants[i].obj);
+    e->sh.nvariants = 0;
+    drop_object(obj);
+    e->sh.obj = VK_NULL_HANDLE;
+    free(e->sh.spv);
+    e->sh.spv = NULL;
+    e->sh.nspv_words = 0;
+}
+
+// ---- the creator threads: objects of programs just set, ahead of their first draw
+enum { CREATORS = 2, CQ = 1 << 16 };
+static shentry *g_cq[CQ];
+static uint64_t g_cq_in, g_cq_out;
+static pthread_cond_t g_cq_cv = PTHREAD_COND_INITIALIZER;
+static void *creator_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("totk-shader-make");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    pthread_mutex_lock(&g_mu);
+    for (;;) {
+        while (g_cq_out == g_cq_in) pthread_cond_wait(&g_cq_cv, &g_mu);
+        shentry *e = g_cq[g_cq_out++ % CQ];
+        e->queued = 0;
+        if (e->refs > 0) ensure(e, 0);   // (a program that went meanwhile: nothing to make)
+    }
     return NULL;
 }
-static void prewarm_start(void) {
-    const char *e = getenv("TOTK_SHADER_PREWARM");   // =0: shaders are made only when first drawn with (A/B)
-    if (e && *e == '0') return;
-    char path[1024];
-    snprintf(path, sizeof path, "%s/used.txt", cache_dir());
-    size_t n = 0;
-    if (!(g_list = read_file(path, &n))) return;
-    g_list_n = n;
-    VLOG("shader list: %zu shaders to make ahead", n / 67);
-    for (int i = 0; i < PREWARM_THREADS; i++) {
+static void creators_start(void) {
+    for (int i = 0; i < CREATORS; i++) {
         pthread_t t;
-        if (pthread_create(&t, NULL, prewarm_thread, NULL) == 0) pthread_detach(t);
+        if (pthread_create(&t, NULL, creator_thread, NULL) == 0) pthread_detach(t);
     }
 }
 
-const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
-    const uint8_t *control = sd->control;
-    if (!control || !sd->data) return NULL;
-    uint32_t length, stage;
-    memcpy(&length, control + 0x704, 4);
-    memcpy(&stage, control + 0x714, 4);
-    if (!length || length > (16u << 20) || (stage != 0 && stage != 1 && stage != 5)) return NULL;
-    char key[65];
-    sha256_hex(control, 0x880, (const void *)(uintptr_t)sd->data, length, key);
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, prewarm_start);
-    uint32_t h = (uint32_t)strtoul(key + 56, NULL, 16) & 4095;
-    pthread_mutex_lock(&g_mu);
-    shentry *e = g_tab[h];
-    while (e && strcmp(e->key, key)) e = e->next;
-    if (!e) {
-        e = calloc(1, sizeof *e);
-        if (!e) die("shader entry");
-        memcpy(e->key, key, sizeof key);
-        e->sh.key = e->key;
-        uint64_t t0 = runtime_now_ns();
-        int ok = load(&e->sh, key, (int)stage);
-        vkb_shader_load_ns += runtime_now_ns() - t0;
-        if (ok) {
-            g_loaded++;
-            list_add(key, (int)stage);
+// ---- programs: the shaders each live program holds
+typedef struct { const void *prog; int n; shentry *e[6]; } progrec;   // prog: NULL free, (void *)1 removed
+typedef struct vkb_shader_rel { int n; shentry *e[6]; } vkb_shader_rel;
+enum { PROGS = 1 << 16 };
+static progrec *g_progs;
+static int g_nprog, g_ngone;
+static uint64_t g_prog_sets, g_prog_drops;
+static progrec *prog_slot(const void *p, int add) {   // g_mu held
+    uint32_t h = (uint32_t)(((uint64_t)(uintptr_t)p * 0x9E3779B97F4A7C15ull) >> 48) & (PROGS - 1);
+    progrec *gone = NULL;
+    for (uint32_t i = 0; i < PROGS; i++, h = (h + 1) & (PROGS - 1)) {
+        progrec *r = &g_progs[h];
+        if (r->prog == p) return r;
+        if (r->prog == (const void *)1) { if (!gone) gone = r; continue; }
+        if (!r->prog) {
+            if (!add) return NULL;
+            if (gone) { g_ngone--; r = gone; }
+            g_nprog++;
+            r->prog = p;
+            r->n = 0;
+            return r;
         }
-        else {
-            e->sh.obj = VK_NULL_HANDLE;
-            if (g_missing++ < 16) VLOG("shader %s (stage %u): no translation in %s", key, stage, cache_dir());
-        }
-        e->next = g_tab[h];
-        g_tab[h] = e;
     }
-    if (e->sh.obj && !e->c1_set) {   // loaded now or ahead (prewarm): the constants come with the game's program
+    return NULL;
+}
+static void progs_rebuild(void) {   // g_mu held: too many removed slots slow the probes down
+    progrec *old = g_progs;
+    if (!(g_progs = calloc(PROGS, sizeof *g_progs))) die("program table");
+    g_nprog = g_ngone = 0;
+    for (int i = 0; i < PROGS; i++)
+        if ((uintptr_t)old[i].prog > 1) { progrec *r = prog_slot(old[i].prog, 1); r->n = old[i].n; memcpy(r->e, old[i].e, sizeof r->e); }
+    free(old);
+}
+static vkb_shader_rel *prog_take(progrec *r) {   // g_mu held: what the program held, for vkb_shader_release
+    if (!r || !r->n) return NULL;
+    vkb_shader_rel *rel = malloc(sizeof *rel);
+    if (!rel) die("shader release");
+    rel->n = r->n;
+    memcpy(rel->e, r->e, sizeof rel->e);
+    r->n = 0;
+    return rel;
+}
+
+// The shader's key (SHA-256 of its control section and code) and NVN stage; 0: not a shader we translate.
+static int shader_key(const NVNshaderData *sd, char key[65], uint32_t *stage) {
+    const uint8_t *control = sd->control;
+    if (!control || !sd->data) return 0;
+    uint32_t length;
+    memcpy(&length, control + 0x704, 4);
+    memcpy(stage, control + 0x714, 4);
+    if (!length || length > (16u << 20) || (*stage != 0 && *stage != 1 && *stage != 5)) return 0;
+    sha256_hex(control, 0x880, (const void *)(uintptr_t)sd->data, length, key);
+    return 1;
+}
+
+static void ahead_start(void);
+static void started(void) { creators_start(); ahead_start(); }
+static pthread_once_t g_start = PTHREAD_ONCE_INIT;
+
+vkb_shader_rel *vkb_shader_prog_set(const void *prog, int n, const NVNshaderData *sd) {
+    pthread_once(&g_start, started);
+    char keys[6][65];
+    uint32_t stages[6];
+    int nk = 0;
+    for (int i = 0; i < n && i < 6; i++) if (shader_key(&sd[i], keys[nk], &stages[nk])) nk++;
+    pthread_mutex_lock(&g_mu);
+    if (!g_progs && !(g_progs = calloc(PROGS, sizeof *g_progs))) die("program table");
+    if (g_nprog + g_ngone > PROGS / 4 * 3) progs_rebuild();
+    progrec *r = prog_slot(prog, 1);
+    vkb_shader_rel *rel = prog_take(r);   // its earlier shaders (let go of after the commands queued with them)
+    for (int i = 0; i < nk && r; i++) {
+        shentry *e = entry(keys[i], (int)stages[i]);
+        r->e[r->n++] = e;
+        if (e->refs++ == 0 && !e->sh.obj && !e->busy && !e->queued && e->loaded >= 0 && g_cq_in - g_cq_out < CQ) {
+            e->queued = 1;
+            g_cq[g_cq_in++ % CQ] = e;
+            pthread_cond_signal(&g_cq_cv);
+        }
+    }
+    g_prog_sets++;
+    pthread_mutex_unlock(&g_mu);
+    return rel;
+}
+vkb_shader_rel *vkb_shader_prog_drop(const void *prog) {
+    pthread_mutex_lock(&g_mu);
+    progrec *r = g_progs ? prog_slot(prog, 0) : NULL;
+    vkb_shader_rel *rel = prog_take(r);
+    if (r) { r->prog = (const void *)1; g_nprog--; g_ngone++; g_prog_drops++; }
+    pthread_mutex_unlock(&g_mu);
+    return rel;
+}
+void vkb_shader_release(vkb_shader_rel *rel) {   // the translation queue reached the program's release
+    if (!rel) return;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < rel->n; i++) unref(rel->e[i]);
+    pthread_mutex_unlock(&g_mu);
+    free(rel);
+}
+
+// ---- compiling ahead: every translated shader once per driver, into the binary file, at the lowest priority
+static _Atomic uint64_t g_ahead_done, g_ahead_made, g_ahead_total;
+static int stage_of(const char *json) {   // "stage": "vs" / "ps" / "cs" -> NVN 0 / 1 / 5; -1 other
+    const char *p = strstr(json, "\"stage\"");
+    if (!p || !(p = strchr(p + 7, '"'))) return -1;
+    return !strncmp(p, "\"vs\"", 4) ? 0 : !strncmp(p, "\"ps\"", 4) ? 1 : !strncmp(p, "\"cs\"", 4) ? 5 : -1;
+}
+static void *ahead_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("totk-shader-ahead");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    char pattern[1024];
+    snprintf(pattern, sizeof pattern, "%s/*.res.json", cache_dir());
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    uint64_t t0 = runtime_now_ns();
+    do {
+        if (strlen(fd.cFileName) != 64 + 9) continue;
+        char key[65];
+        memcpy(key, fd.cFileName, 64);
+        key[64] = 0;
+        atomic_fetch_add(&g_ahead_total, 1);
+        vkb_shbin_variant v0 = {{0}};
+        if (vkb_shbin_has(key, &v0)) { atomic_fetch_add(&g_ahead_done, 1); continue; }
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", cache_dir(), fd.cFileName);
+        char *j = read_file(path, NULL);
+        int stage = j ? stage_of(j) : -1;
+        free(j);
+        if (stage < 0) continue;
+        vkb_shader tmp;
+        memset(&tmp, 0, sizeof tmp);
+        uint32_t *spv;
+        size_t bytes;
+        VkShaderEXT obj;
+        if (load_module(&tmp, key, stage, &spv, &bytes)) {
+            if (make_object(key, &v0, tmp.vk_stage, spv, bytes, &obj) == VK_SUCCESS) {
+                vk.vkDestroyShaderEXT(vkc.device, obj, NULL);   // only its binary was wanted; no command ever saw it
+                atomic_fetch_sub(&g_obj_live, 1);
+                atomic_fetch_add(&g_ahead_made, 1);
+            }
+            free(spv);
+        }
+        atomic_fetch_add(&g_ahead_done, 1);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    VLOG("shaders compiled ahead: %llu new of %llu, %.0f s", (unsigned long long)g_ahead_made, (unsigned long long)g_ahead_total,
+         (runtime_now_ns() - t0) / 1e9);
+    return NULL;
+}
+static void ahead_start(void) {
+    const char *e = getenv("TOTK_SHADER_AHEAD");
+    if (e && *e == '0') return;
+    pthread_t t;
+    if (pthread_create(&t, NULL, ahead_thread, NULL) == 0) pthread_detach(t);
+}
+
+const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
+    char key[65];
+    uint32_t stage;
+    if (!shader_key(sd, key, &stage)) return NULL;
+    pthread_once(&g_start, started);
+    pthread_mutex_lock(&g_mu);
+    shentry *e = entry(key, (int)stage);
+    if (!ensure(e, 1)) { pthread_mutex_unlock(&g_mu); return NULL; }
+    if (!e->c1_set) {   // the constants come with the game's program
         e->c1_set = 1;
-        if (e->prewarmed) g_prewarm_hits++;
-        uint32_t c1off;
+        const uint8_t *control = sd->control;
+        uint32_t c1off, length;
         memcpy(&c1off, control + 0x700, 4);   // the shader's constants: the code's tail (c1)
+        memcpy(&length, control + 0x704, 4);
         if (c1off < length) {   // copied: the program's memory may be freed and reused while the key stays cached
             uint8_t *c = malloc(length - c1off);
             if (!c) die("shader constants");
@@ -462,7 +667,21 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
         }
     }
     pthread_mutex_unlock(&g_mu);
-    return e->sh.obj ? &e->sh : NULL;
+    return &e->sh;
 }
 
 void vkb_shader_stats(uint64_t *loaded, uint64_t *missing) { *loaded = g_loaded; *missing = g_missing; }
+void vkb_shader_report(void) {   // the memory log
+    uint64_t rec, bytes, hits, misses;
+    vkb_shbin_stats(&rec, &bytes, &hits, &misses);
+    pthread_mutex_lock(&g_mu);
+    int progs = g_nprog;
+    uint64_t sets = g_prog_sets, drops = g_prog_drops;
+    pthread_mutex_unlock(&g_mu);
+    VLOG("shaders: objects %llu (made from binaries %llu, compiled %llu, binaries refused %llu, destroyed %llu); programs live %d "
+         "(set %llu, finalized %llu); binaries on disk %llu (%.0f MiB); compiled ahead %llu of %llu",
+         (unsigned long long)g_obj_live, (unsigned long long)g_from_bin, (unsigned long long)g_from_spv,
+         (unsigned long long)g_bin_refused, (unsigned long long)g_obj_destroyed, progs, (unsigned long long)sets,
+         (unsigned long long)drops, (unsigned long long)rec, bytes / 1048576.0, (unsigned long long)g_ahead_done,
+         (unsigned long long)g_ahead_total);
+}
