@@ -200,6 +200,10 @@ void runtime_dump_stacks(const char *why) {
     static int depth[MAX_THREADS];
     unsigned n = 0;
     DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    if (!ntdll_hi) {   // (the profiler sets them when it runs)
+        module_range(GetModuleHandleA("ntdll.dll"), &ntdll_lo, &ntdll_hi);
+        module_range(GetModuleHandleA("win32u.dll"), &win32u_lo, &win32u_hi);
+    }
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
     THREADENTRY32 te = {sizeof te};
@@ -249,6 +253,16 @@ void runtime_dump_stacks(const char *why) {
             char fn[512];
             describe(proc, rips[t][d], fn, sizeof fn);
             fprintf(stderr, "[totk]     %s\n", fn);
+        }
+        Cpu *c = guest_cpu_of_thread(ids[t]);
+        if (c && depth[t] && !((rips[t][0] >= ntdll_lo && rips[t][0] < ntdll_hi) || (rips[t][0] >= win32u_lo && rips[t][0] < win32u_hi))) {
+            // running guest code (not waiting): its registers, read live (the thread keeps going)
+            fprintf(stderr, "[totk]     guest pc %#llx sp %#llx lr %#llx\n", (unsigned long long)c->pc, (unsigned long long)c->sp,
+                    (unsigned long long)c->x[30]);
+            for (int r = 0; r < 30; r += 6)
+                fprintf(stderr, "[totk]     x%-2d %#llx %#llx %#llx %#llx %#llx %#llx\n", r, (unsigned long long)c->x[r],
+                        (unsigned long long)c->x[r + 1], (unsigned long long)c->x[r + 2], (unsigned long long)c->x[r + 3],
+                        (unsigned long long)c->x[r + 4], (unsigned long long)c->x[r + 5]);
         }
     }
     fflush(stderr);

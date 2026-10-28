@@ -11,7 +11,26 @@
 static __thread Cpu *t_cpu;
 
 Cpu *guest_cpu(void) { return t_cpu; }
-void guest_cpu_set(Cpu *c) { t_cpu = c; }
+
+// Which host thread runs which guest CPU (Windows thread ids): the hang watchdog prints a stuck thread's registers.
+#ifdef _WIN32
+__declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+#define CPU_THREADS 256
+static struct { unsigned long tid; Cpu *c; } g_cpu_of[CPU_THREADS];
+static _Atomic int g_ncpu;
+Cpu *guest_cpu_of_thread(unsigned long tid) {
+    int n = atomic_load(&g_ncpu);
+    for (int i = n < CPU_THREADS ? n : CPU_THREADS; i-- > 0;) if (g_cpu_of[i].tid == tid) return g_cpu_of[i].c;
+    return NULL;
+}
+#endif
+void guest_cpu_set(Cpu *c) {
+    t_cpu = c;
+#ifdef _WIN32
+    int i = atomic_fetch_add(&g_ncpu, 1);
+    if (i < CPU_THREADS) { g_cpu_of[i].c = c; g_cpu_of[i].tid = GetCurrentThreadId(); }
+#endif
+}
 
 // Horizon thread-local region (tpidrro_el0): 0x200 bytes; +0x000 IPC message buffer, +0x1f8 the SDK's thread pointer.
 // MacNativeGames (loader.c runtime_thread_init) points +0x1f8 at a zeroed 0x400-byte placeholder until the SDK sets it.

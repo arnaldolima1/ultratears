@@ -15,6 +15,7 @@ void *runtime_symbol(const char *name);  // guest address of an exported symbol 
 // ---- the calling guest thread (guest.c)
 Cpu *guest_cpu(void);                    // this thread's guest CPU state, NULL on a pure host thread
 void guest_cpu_set(Cpu *c);
+Cpu *guest_cpu_of_thread(unsigned long tid);   // (Windows) the guest CPU a host thread runs, NULL if none
 Cpu *guest_cpu_new(uint64_t stack_top, uint64_t tls);
 uint64_t guest_tls_alloc(void);          // a thread's TLS block (tpidrro_el0): IPC message buffer at +0, 0x200 bytes
 // Call a guest function with integer/pointer arguments from host code running on a guest thread. The caller's guest
