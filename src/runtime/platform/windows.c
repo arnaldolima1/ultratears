@@ -7,6 +7,7 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <malloc.h>
 
 #include "../platform.h"
 
@@ -96,9 +97,11 @@ void plat_memory_map(void) {
     static struct { uint64_t lo, hi; } hr[MAXR];
     int nhr = 0;
     uint64_t heap_commit = 0, heap_used = 0;
-    HANDLE heaps[64];
-    DWORD nh = GetProcessHeaps(64, heaps);
-    for (DWORD h = 0; h < nh && h < 64; h++) {
+    // The process heap and the C runtime's (malloc): they live as long as the process. Other heaps (the driver's) may be
+    // destroyed between GetProcessHeaps and HeapLock - walking them crashed (2026-10-28); their memory counts as other.
+    HANDLE heaps[2] = {GetProcessHeap(), (HANDLE)_get_heap_handle()};
+    DWORD nh = heaps[1] && heaps[1] != heaps[0] ? 2 : 1;
+    for (DWORD h = 0; h < nh; h++) {
         if (!HeapLock(heaps[h])) continue;
         PROCESS_HEAP_ENTRY e = {0};
         while (HeapWalk(heaps[h], &e)) {
