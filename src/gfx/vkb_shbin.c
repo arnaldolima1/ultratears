@@ -1,4 +1,4 @@
-// The driver's compiled shaders on disk: one file next to the translated shaders (<shader dir>/shader-binaries.bin),
+// The driver's compiled shaders on disk: one file, data/shaders/compiled.bin (TOTK_SHADER_BIN; `compiled=` in ultratears.cfg),
 // records of (shader key, vertex variant) -> the bytes vkGetShaderBinaryDataEXT gave. Creating a shader object from
 // them skips the compile (RTX 3060: 1.1 ms instead of 2.7 ms from SPIR-V, 26 KiB a shader, 2026-10-28), and it lets
 // shader objects follow the game's programs - made when the game sets a program, destroyed when it finalizes it -
@@ -66,9 +66,8 @@ static slot_t *find(const uint8_t key[32], const vkb_shbin_variant *v, int add) 
 static void open_file(void) {   // g_mu held
     g_init = -1;
     if (!(g_tab = calloc(CAP, sizeof *g_tab))) return;
-    const char *dir = getenv("TOTK_SHADER_DIR");
-    char path[1024];
-    snprintf(path, sizeof path, "%s/shader-binaries.bin", dir ? dir : "data/shaders/ryujinx");
+    const char *path = getenv("TOTK_SHADER_BIN");
+    if (!path || !*path) path = "data/shaders/compiled.bin";   // the driver's, apart from the translated shaders
     uint8_t want[HEADER] = {0};
     memcpy(want, MAGIC, 8);
     memcpy(want + 8, vkc.so.shaderBinaryUUID, 16);

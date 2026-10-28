@@ -381,7 +381,8 @@ def step_textures(dump, state, cpus):
 def step_finish(dump, state, cpus):
     fonts = dump / 'sysdata/fonts'
     lines = ['# Written by tools/setup.py: where UltraTears finds its data (relative to this folder).',
-             'exefs=data/exefs', 'romfs=data/romfs', 'shaders=data/shaders/ryujinx', 'textures=data/textures',
+             'exefs=data/exefs', 'romfs=data/romfs', 'shaders=data/shaders/ryujinx', 'compiled=data/shaders/compiled.bin',
+             'textures=data/textures',
              'saves=userdata']
     if fonts.is_dir() and list(fonts.glob('*.bfttf')):
         shutil.copytree(fonts, DATA / 'fonts', dirs_exist_ok=True)
