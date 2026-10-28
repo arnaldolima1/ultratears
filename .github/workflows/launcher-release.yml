@@ -42,6 +42,19 @@ jobs:
       - run: npm ci
         working-directory: launcher
 
+      # the release's text: launcher/release-notes/<version>.md (launcher/release.py writes it), else a plain line
+      - id: notes
+        shell: bash
+        run: |
+          f="launcher/release-notes/${GITHUB_REF_NAME#launcher-v}.md"
+          {
+            echo 'body<<NOTES_EOF'
+            if [ -f "$f" ]; then cat "$f"; else echo 'Instaladores do UltraTears Launcher. / UltraTears Launcher installers.'; fi
+            echo
+            echo 'Windows: `_x64-setup.exe` · macOS (Apple silicon): `.dmg` · Launchers já instalados se atualizam sozinhos. / Installed launchers update themselves.'
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,11 +65,7 @@ jobs:
           args: --target ${{ matrix.target }}
           tagName: ${{ github.ref_name }}
           releaseName: UltraTears Launcher ${{ github.ref_name }}
-          releaseBody: |
-            Instaladores do UltraTears Launcher. / UltraTears Launcher installers.
-            - macOS (Apple silicon): .dmg
-            - Windows: _x64-setup.exe
-            Launchers já instalados se atualizam sozinhos. / Installed launchers update themselves.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

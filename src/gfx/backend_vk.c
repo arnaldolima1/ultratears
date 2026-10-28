@@ -744,6 +744,7 @@ void retire_start(void) {
 static VkQueryPool g_tsq;
 static int g_ts_used[SLOTS];
 static uint64_t g_gpu_ns, g_slot_wait_ns;
+uint64_t vkb_gpu_ns_total(void) { return g_gpu_ns; }   // the overlay's GPU load (window_sdl.c); read across threads, approximate
 static void gpu_time_begin(int slot) {   // into the slot's own command buffer (the submission's first)
     if (!g_tsq) {
         VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * SLOTS};

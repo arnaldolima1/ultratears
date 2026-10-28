@@ -219,6 +219,8 @@ static int create_device(void) {
         {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME, &flr, &has_lr},
         // development (TOTK_VK_CHECKPOINTS=1): the markers a lost device reached
         {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, NULL, &vkc.has_checkpoints},
+        // the overlay's video memory figures
+        {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, NULL, &vkc.has_memory_budget},
 #ifdef __APPLE__
         // (fork) a portability driver (MoltenVK) must have this one enabled
         {"VK_KHR_portability_subset", NULL, NULL},

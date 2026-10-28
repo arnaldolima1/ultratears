@@ -5,8 +5,9 @@
 //  - game controllers: buttons by position as on a Switch controller (the right face button is A), sticks with Y up;
 //  - rumble: the game's vibration values (hid_feedback.c) drive the controller's low / high frequency motors.
 //  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen.
-//  - F3: the frame rate over the picture (TOTK_FPS_OVERLAY=1 starts with it on); F1: a panel with frame times, CPU,
-//    memory, GPU and the mods' state; F2: the 60 FPS mod on / off (src/host/frame_step.c).
+//  - the overlay (src/vk/overlay.cpp): F3 cycles the counter (off / FPS / detailed; TOTK_FPS_OVERLAY=1 starts with it),
+//    F1 opens the panel (frame times, CPU, GPU, memory, options; it takes the mouse while open, Esc closes it);
+//    F2: the 60 FPS mod on / off (src/host/frame_step.c).
 // A launcher hands the window over with TOTK_WINDOW=x,y,w,h (pixels), TOTK_BORDERLESS=1, TOTK_FULLSCREEN=1 and
 // TOTK_START_HIDDEN=1: the window stays hidden until the first game frame is shown, so its own window can stay up
 // (a loading screen) until then.
@@ -27,12 +28,14 @@ BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process, proc_mem *counters, DWORD si
 
 #include "host.h"
 #include "keyboard_input.h"
+#include "../vk/overlay.h"
 #include "../vk/present.h"
 
 static SDL_Window *window;
 static SDL_Gamepad *pad;
 static SDL_Mutex *pad_lock;
-static bool hidden_until_frame, fps_overlay, panel;
+static bool hidden_until_frame;
+uint64_t vkb_gpu_ns_total(void);   // src/gfx/backend_vk.c
 int totk_fps60(void);              // src/host/frame_step.c
 void totk_fps60_set(int on);
 
@@ -172,7 +175,7 @@ int window_init(void) {
     pad_lock = SDL_CreateMutex();
     hidden_until_frame = env_on("TOTK_START_HIDDEN");
     if (hidden_until_frame) startup_status("starting\n");
-    fps_overlay = env_on("TOTK_FPS_OVERLAY");
+    ovl_settings_load();
     SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (hidden_until_frame) flags |= SDL_WINDOW_HIDDEN;
     if (env_on("TOTK_BORDERLESS")) flags |= SDL_WINDOW_BORDERLESS;
@@ -261,73 +264,68 @@ static void toggle_fullscreen(void) {
     SDL_SetWindowFullscreen(window, !on);   // borderless desktop fullscreen (no display mode change)
 }
 
-// This process's CPU use (all cores = 100 %) and memory since the last call.
-static void process_usage(double *cpu, double *ram_gb) {
-    *cpu = 0; *ram_gb = 0;
+// This process's CPU use and the whole system's (all cores = 100 %), and memory, since the last call.
+static void usage(ovl_stats *s) {
+    s->cpu_proc = 0; s->cpu_sys = -1; s->ram_proc_gb = s->ram_used_gb = s->ram_total_gb = 0;
 #ifdef _WIN32
-    static uint64_t last_cpu, last_wall;
-    FILETIME created, exited, kernel, user;
+    static uint64_t last_cpu, last_wall, last_idle, last_busy;
+    FILETIME created, exited, kernel, user, idle;
     if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         uint64_t used = ((uint64_t)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime) +
                         ((uint64_t)user.dwHighDateTime << 32 | user.dwLowDateTime);   // 100 ns units
         uint64_t wall = runtime_now_ns() / 100;
-        int cores = SDL_GetNumLogicalCPUCores();
-        if (last_wall && wall > last_wall && cores > 0) *cpu = 100.0 * (double)(used - last_cpu) / ((double)(wall - last_wall) * cores);
+        if (last_wall && wall > last_wall && s->cpu_cores > 0) s->cpu_proc = 100.0 * (double)(used - last_cpu) / ((double)(wall - last_wall) * s->cpu_cores);
         last_cpu = used; last_wall = wall;
     }
+    if (GetSystemTimes(&idle, &kernel, &user)) {   // kernel time includes the idle time
+        uint64_t i = (uint64_t)idle.dwHighDateTime << 32 | idle.dwLowDateTime;
+        uint64_t busy = ((uint64_t)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime) +
+                        ((uint64_t)user.dwHighDateTime << 32 | user.dwLowDateTime);
+        if (last_busy && busy > last_busy) s->cpu_sys = 100.0 * (1.0 - (double)(i - last_idle) / (double)(busy - last_busy));
+        last_idle = i; last_busy = busy;
+    }
     proc_mem pm = {sizeof pm};
-    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) *ram_gb = pm.ws / 1073741824.0;
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) s->ram_proc_gb = pm.ws / 1073741824.0;
+    MEMORYSTATUSEX ms = {sizeof ms};
+    if (GlobalMemoryStatusEx(&ms)) {
+        s->ram_total_gb = ms.ullTotalPhys / 1073741824.0;
+        s->ram_used_gb = (ms.ullTotalPhys - ms.ullAvailPhys) / 1073741824.0;
+    }
 #endif
 }
 
-// F1: what is useful while playing, drawn over the picture (present.c: the first line gold, '~' lines green).
-static void panel_text(char *out, size_t size, double fps, double shown_fps, double worst_ms) {
-    double cpu, ram;
-    process_usage(&cpu, &ram);
-    int w = 0, h = 0;
-    SDL_GetWindowSizeInPixels(window, &w, &h);
-    snprintf(out, size,
-             "ULTRATEARS\n"
-             "FPS %.0f  (%.1f MS)  SHOWN %.0f\n"
-             "WORST FRAME %.1f MS\n"
-             "CPU %.0f%%   RAM %.1f GB\n"
-             "GPU %.40s\n"
-             "WINDOW %dX%d\n"
-             "%s60 FPS MOD  %s   [F2]\n"
-             "%sFPS COUNTER %s   [F3]\n"
-             "\n"
-             "F1 CLOSE  F11 FULLSCREEN",
-             fps, fps > 0 ? 1000.0 / fps : 0.0, shown_fps, worst_ms, cpu, ram, vkp_gpu_name(), w, h,
-             totk_fps60() ? "~" : "", totk_fps60() ? "ON " : "OFF", fps_overlay ? "~" : "", fps_overlay ? "ON " : "OFF");
-}
-
-// Game frame rate and shown frame rate in the title, the overlay and the panel, twice a second.
-static bool overlay_dirty;   // a key changed what is shown: redraw now with the last rates
+// Game frame rate and shown frame rate in the title and the overlay's figures, twice a second.
 static void title_update(void) {
-    static uint64_t t0, game0, shown0;
-    static double rate, rate_shown, worst;
-    uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented();
-    if (!t0) { t0 = now; game0 = game; shown0 = shown; return; }
-    if (now - t0 >= 500000000) {
-        double s = (now - t0) / 1e9;
-        rate = (game - game0) / s; rate_shown = (shown - shown0) / s; worst = vkp_worst_frame_ms();
-        char title[128];
-        snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", rate, rate_shown);
-        SDL_SetWindowTitle(window, title);
-        t0 = now; game0 = game; shown0 = shown;
-    } else if (!overlay_dirty) return;
-    overlay_dirty = false;
-    if (panel) {
-        char text[512];
-        panel_text(text, sizeof text, rate, rate_shown, worst);
-        vkp_overlay(text);
-    } else if (fps_overlay) {
-        char text[32];
-        snprintf(text, sizeof text, "%.0f FPS", rate);
-        vkp_overlay(text);
-    } else vkp_overlay(NULL);
+    static uint64_t t0, game0, shown0, gpu0;
+    uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented(), gpu = vkb_gpu_ns_total();
+    ovl_flags_set(totk_fps60(), (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0);
+    if (!t0) { t0 = now; game0 = game; shown0 = shown; gpu0 = gpu; return; }
+    if (now - t0 < 500000000) return;
+    double secs = (now - t0) / 1e9;
+    ovl_stats s = {.fps = (game - game0) / secs, .shown_fps = (shown - shown0) / secs, .worst_ms = vkp_worst_frame_ms(),
+                   .cpu_cores = SDL_GetNumLogicalCPUCores()};
+    s.gpu_ms = game > game0 ? (gpu - gpu0) / 1e6 / (double)(game - game0) : 0;
+    s.gpu_load = (gpu - gpu0) / (double)(now - t0);
+    if (s.gpu_load > 1) s.gpu_load = 1;
+    usage(&s);
+    ovl_stats_set(&s);
+    char title[128];
+    snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", s.fps, s.shown_fps);
+    SDL_SetWindowTitle(window, title);
+    t0 = now; game0 = game; shown0 = shown; gpu0 = gpu;
 }
 
+// F1: the panel takes the mouse (free cursor) until it closes, then the camera has it again.
+static void panel_toggle(int on) {
+    ovl_panel_set(on);
+    mouse_capture(!on && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS));
+    if (on) {
+        float x, y;
+        SDL_GetMouseState(&x, &y);
+        float d = SDL_GetWindowPixelDensity(window);
+        ovl_mouse_pos(x * d, y * d);
+    }
+}
 _Noreturn void window_loop(void) {
     for (;;) {
         SDL_Event e;
@@ -339,7 +337,7 @@ _Noreturn void window_loop(void) {
                     _Exit(0);
                 case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F8) {
-                        if (keyboard_input_mouse_mode()) mouse_capture(!SDL_GetWindowRelativeMouseMode(window));
+                        if (keyboard_input_mouse_mode() && !ovl_panel()) mouse_capture(!SDL_GetWindowRelativeMouseMode(window));
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
@@ -349,24 +347,30 @@ _Noreturn void window_loop(void) {
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
-                        fps_overlay = !fps_overlay;
-                        overlay_dirty = true;
+                        ovl_counter_cycle();
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F1) {
-                        panel = !panel;
-                        overlay_dirty = true;
+                        panel_toggle(!ovl_panel());
+                        break;
+                    }
+                    if (ovl_panel() && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_ESCAPE) {
+                        panel_toggle(0);
                         break;
                     }
                     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F2) {
                         totk_fps60_set(!totk_fps60());
-                        overlay_dirty = true;
                         break;
                     }
                     if (!e.key.repeat) keyboard_input_key(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN);
                     break;
                 }
                 case SDL_EVENT_MOUSE_MOTION: {
+                    if (ovl_panel()) {   // the panel has the mouse
+                        float d = SDL_GetWindowPixelDensity(window);
+                        ovl_mouse_pos(e.motion.x * d, e.motion.y * d);
+                        break;
+                    }
                     bool captured = SDL_GetWindowRelativeMouseMode(window);
                     mouse_camera_set_capture(captured);
                     if (captured) {
@@ -377,6 +381,10 @@ _Noreturn void window_loop(void) {
                     break;
                 }
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    if (ovl_panel()) {
+                        ovl_mouse_button(e.button.button == SDL_BUTTON_LEFT ? 0 : e.button.button == SDL_BUTTON_RIGHT ? 1 : 2, 1);
+                        break;
+                    }
                     if (keyboard_input_mouse_mode() && !SDL_GetWindowRelativeMouseMode(window)) {
                         if (e.button.button == SDL_BUTTON_LEFT) mouse_capture(1);
                         break;   // recapture is not an attack; free-cursor clicks do not drive the game
@@ -384,10 +392,14 @@ _Noreturn void window_loop(void) {
                     keyboard_input_mouse_button(e.button.button, 1);
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_UP:
-                    keyboard_input_mouse_button(e.button.button, 0);
+                    if (ovl_panel()) ovl_mouse_button(e.button.button == SDL_BUTTON_LEFT ? 0 : e.button.button == SDL_BUTTON_RIGHT ? 1 : 2, 0);
+                    keyboard_input_mouse_button(e.button.button, 0);   // (a button held when the panel opened is released)
+                    break;
+                case SDL_EVENT_MOUSE_WHEEL:
+                    if (ovl_panel()) ovl_mouse_wheel(e.wheel.y);
                     break;
                 case SDL_EVENT_WINDOW_FOCUS_LOST: mouse_capture(0); mouse_camera_reset(MOUSE_RESET_FOCUS_LOST); keyboard_input_clear(); break;
-                case SDL_EVENT_WINDOW_FOCUS_GAINED: mouse_capture(1); pad_update(); break;
+                case SDL_EVENT_WINDOW_FOCUS_GAINED: mouse_capture(!ovl_panel()); pad_update(); break;
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: vkp_resized(); break;
                 case SDL_EVENT_GAMEPAD_ADDED: open_pad(e.gdevice.which); break;
                 case SDL_EVENT_GAMEPAD_REMOVED: close_pad(e.gdevice.which); break;
@@ -411,6 +423,10 @@ _Noreturn void window_loop(void) {
             SDL_ShowWindow(window);
             SDL_RaiseWindow(window);
         }
+        unsigned act = ovl_take_actions();   // what the panel asked for
+        if (act & OVL_ACT_FPS60) totk_fps60_set(!totk_fps60());
+        if (act & OVL_ACT_FULLSCREEN) toggle_fullscreen();
+        if (act & OVL_ACT_CLOSE) panel_toggle(0);
         if (pad) pad_update();
         title_update();
     }

@@ -42,9 +42,12 @@ typedef struct {
     uint32_t *spv; size_t nspv_words;    // vertex shaders: the module as loaded (bindings rewritten), for variants
     uint32_t in_mask, out_mask;          // input / output locations
     vkb_variant variants[VKB_VARIANTS]; int nvariants;   // integer-attribute variants made so far
+    int pending;                         // being made in the background (__atomic loads): no object yet, skip the draw
 } vkb_shader;
 
-const vkb_shader *vkb_shader_get(const NVNshaderData *sd);   // NULL: no translation (logged)
+// NULL: no translation (logged). The shader may still be `pending` (made in the background): only `stage` is set then.
+const vkb_shader *vkb_shader_get(const NVNshaderData *sd);
+int vkb_shader_compiling(void);          // shaders queued or being made in the background now (the overlay's notice)
 // The vertex shader object for integer attributes at intmask (signed: sintmask): see vkb_spv.c.
 VkShaderEXT vkb_shader_variant(const vkb_shader *vs, uint32_t intmask, uint32_t sintmask);
 VkDescriptorSetLayout vkb_set_layout(int compute);

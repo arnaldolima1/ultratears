@@ -120,7 +120,7 @@ static VkDescriptorSet alloc_set(int compute) {
 
 // ---------------- the render state the command stream sets ----------------
 static __thread struct {
-    const prog_t *prog; uint64_t prog_serial; const vkb_shader *sh[6]; int prog_ok;
+    const prog_t *prog; uint64_t prog_serial; const vkb_shader *sh[6]; int prog_ok, prog_pending;
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     int has_blend[8], has_color, has_chmask, has_ms, has_poly, has_ds;
     float vp[16][6]; int nvp; float dr[2]; int has_dr;
@@ -972,10 +972,17 @@ static void bind_set(VkCommandBuffer cb, VkDescriptorSet set, int compute) {
 // Programs resolved before, by serial (a new serial with every SetShaders): resolving hashes the shaders' code
 // (vkb_shader_get, SHA-256 of tens of KiB), and TOTK switches programs hundreds of times a frame - with only the
 // last one remembered, hashing took ~20% of the recording thread (Great Sky Island, 2026-10-24).
+// A shader still being made in the background (vkb_shader.c) skips the draw and leaves the program unremembered: it is
+// looked at again at each draw, and resolved anew once made (its constants come with the game's program then).
 static int resolve_program(void) {
     if (!S.prog) return 0;
-    if (S.prog_serial == S.prog->serial && S.prog_serial) return S.prog_ok;
+    if (S.prog_serial == S.prog->serial && S.prog_serial) {
+        if (!S.prog_pending) return S.prog_ok;
+        for (int i = 0; i < 6; i++)
+            if (S.sh[i] && __atomic_load_n(&S.sh[i]->pending, __ATOMIC_ACQUIRE)) return 0;
+    }
     S.prog_serial = S.prog->serial;
+    S.prog_pending = 0;
     uint32_t at = (uint32_t)(S.prog_serial * 0x9E3779B97F4A7C15ull >> 51) & (PROGS - 1);
     if (S.prog_serial && B->progs[at].serial == S.prog_serial) {
         memcpy(S.sh, B->progs[at].sh, sizeof S.sh);
@@ -988,8 +995,10 @@ static int resolve_program(void) {
     for (unsigned i = 0; i < S.prog->nstage && i < 6; i++) {
         const vkb_shader *sh = vkb_shader_get(&S.prog->sd[i]);
         if (!sh || sh->unsupported) { S.prog_ok = 0; S.bad_key = sh ? sh->key : NULL; continue; }
+        if (__atomic_load_n(&sh->pending, __ATOMIC_ACQUIRE)) S.prog_pending = 1;
         S.sh[sh->stage] = sh;
     }
+    if (S.prog_pending) return S.prog_ok = 0;
     B->progs[at].serial = S.prog_serial;
     memcpy(B->progs[at].sh, S.sh, sizeof S.sh);
     B->progs[at].bad_key = S.bad_key;

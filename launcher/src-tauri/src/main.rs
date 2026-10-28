@@ -397,7 +397,7 @@ fn has_visible_window(_pid: u32, home: &Path) -> bool {
 /// Starts the game hidden over the rectangle (x, y, w, h in pixels); "game-visible" when its window shows its first
 /// frame, "game-exit" with the exit code when it ends.
 #[tauri::command]
-fn launch_game(app: AppHandle, procs: State<Procs>, rect: (i32, i32, i32, i32), fullscreen: bool, borderless: bool) -> Result<(), String> {
+fn launch_game(app: AppHandle, procs: State<Procs>, rect: (i32, i32, i32, i32), fullscreen: bool, borderless: bool, lang: Option<String>) -> Result<(), String> {
     let mut slot = procs.game.lock().unwrap();
     if slot.is_some() {
         return Err("O jogo já está aberto.".into());
@@ -417,6 +417,9 @@ fn launch_game(app: AppHandle, procs: State<Procs>, rect: (i32, i32, i32, i32), 
     }
     if borderless {
         cmd.env("TOTK_BORDERLESS", "1");
+    }
+    if let Some(l) = lang.filter(|l| l == "en" || l == "pt") {
+        cmd.env("TOTK_LANG", l);   // the game's own notices (overlay) in the launcher's language
     }
     #[cfg(unix)]
     cmd.process_group(0);

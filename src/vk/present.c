@@ -4,6 +4,7 @@
 // (the replayer's output image) and presents it. The game never waits on the display here; its pacing comes from the vsync events (front_win.c).
 // Mailbox when the surface offers it (the newest frame wins, no tearing), FIFO otherwise.
 #include "present.h"
+#include "overlay.h"
 #include "vk.h"
 
 #include <SDL3/SDL.h>
@@ -23,6 +24,7 @@ static VkSwapchainKHR swapchain;
 static VkFormat format;
 static VkExtent2D extent;
 static VkImage images[MAX_IMAGES];
+static VkImageView views[MAX_IMAGES];   // the overlay draws through them
 static uint32_t nimages;
 static VkSemaphore image_ready[FRAMES], render_done[MAX_IMAGES];
 static VkFence in_flight[FRAMES];
@@ -35,127 +37,6 @@ static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static uint64_t frames_in;           // under mu
 static _Atomic uint64_t presented, game_shown, worst_gap_ns;
 static _Atomic int resized;
-
-// ---- overlay: text (the frame rate, the F1 panel) drawn by the CPU into a small host-visible buffer per frame in
-// flight and copied over the swapchain image after the game's picture; no render pass, no shader. Lines end with '\n';
-// the first is drawn in gold, a line starting with '~' in green (the '~' is not drawn), the others in cream.
-#define OV_W 760
-#define OV_H 440
-static char ov_text[1024];           // under mu; empty = no overlay
-static VkBuffer ov_buf[FRAMES];
-static VkDeviceMemory ov_mem[FRAMES];
-static uint32_t *ov_map[FRAMES];
-
-// 5x7 glyphs, one byte per row (bit 4 = leftmost column)
-static const uint8_t *glyph(char ch) {
-    static const uint8_t digits[10][7] = {
-        {14, 17, 19, 21, 25, 17, 14}, {4, 12, 4, 4, 4, 4, 14}, {14, 17, 1, 2, 4, 8, 31}, {31, 2, 4, 2, 1, 17, 14},
-        {2, 6, 10, 18, 31, 2, 2}, {31, 16, 30, 1, 1, 17, 14}, {6, 8, 16, 30, 17, 17, 14}, {31, 1, 2, 4, 8, 8, 8},
-        {14, 17, 17, 14, 17, 17, 14}, {14, 17, 17, 15, 1, 2, 12}};
-    static const uint8_t letters[26][7] = {
-        {14, 17, 17, 31, 17, 17, 17}, {30, 17, 17, 30, 17, 17, 30}, {14, 17, 16, 16, 16, 17, 14},
-        {28, 18, 17, 17, 17, 18, 28}, {31, 16, 16, 30, 16, 16, 31}, {31, 16, 16, 30, 16, 16, 16},
-        {14, 17, 16, 23, 17, 17, 15}, {17, 17, 17, 31, 17, 17, 17}, {14, 4, 4, 4, 4, 4, 14},
-        {7, 2, 2, 2, 2, 18, 12}, {17, 18, 20, 24, 20, 18, 17}, {16, 16, 16, 16, 16, 16, 31},
-        {17, 27, 21, 21, 17, 17, 17}, {17, 17, 25, 21, 19, 17, 17}, {14, 17, 17, 17, 17, 17, 14},
-        {30, 17, 17, 30, 16, 16, 16}, {14, 17, 17, 17, 21, 18, 13}, {30, 17, 17, 30, 20, 18, 17},
-        {15, 16, 16, 14, 1, 1, 30}, {31, 4, 4, 4, 4, 4, 4}, {17, 17, 17, 17, 17, 17, 14},
-        {17, 17, 17, 17, 17, 10, 4}, {17, 17, 17, 21, 21, 21, 10}, {17, 17, 10, 4, 10, 17, 17},
-        {17, 17, 17, 10, 4, 4, 4}, {31, 1, 2, 4, 8, 16, 31}};
-    static const struct { char ch; uint8_t rows[7]; } marks[] = {
-        {'.', {0, 0, 0, 0, 0, 12, 12}}, {':', {0, 12, 12, 0, 12, 12, 0}}, {'-', {0, 0, 0, 31, 0, 0, 0}},
-        {'/', {1, 1, 2, 4, 8, 16, 16}}, {'%', {24, 25, 2, 4, 8, 19, 3}}, {'(', {2, 4, 8, 8, 8, 4, 2}},
-        {')', {8, 4, 2, 2, 2, 4, 8}}, {'[', {14, 8, 8, 8, 8, 8, 14}}, {']', {14, 2, 2, 2, 2, 2, 14}},
-        {'+', {0, 4, 4, 31, 4, 4, 0}}, {',', {0, 0, 0, 0, 12, 4, 8}}, {'|', {4, 4, 4, 4, 4, 4, 4}},
-        {'=', {0, 0, 31, 0, 31, 0, 0}}, {'>', {8, 4, 2, 1, 2, 4, 8}}};
-    if (ch >= '0' && ch <= '9') return digits[ch - '0'];
-    if (ch >= 'a' && ch <= 'z') ch -= 32;
-    if (ch >= 'A' && ch <= 'Z') return letters[ch - 'A'];
-    for (unsigned i = 0; i < sizeof marks / sizeof *marks; i++) if (marks[i].ch == ch) return marks[i].rows;
-    return NULL;
-}
-
-static uint32_t ov_pixel(uint8_t r, uint8_t g, uint8_t b) {
-    return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB
-               ? 0xFF000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | b
-               : 0xFF000000u | (uint32_t)b << 16 | (uint32_t)g << 8 | r;
-}
-
-// Draws the text into this slot's buffer; the size drawn, 0 = nothing to copy.
-static int ov_draw(unsigned slot, uint32_t *w, uint32_t *h) {
-    char text[sizeof ov_text];
-    pthread_mutex_lock(&mu);
-    memcpy(text, ov_text, sizeof text);
-    pthread_mutex_unlock(&mu);
-    if (!text[0]) return 0;
-    if (format != VK_FORMAT_B8G8R8A8_UNORM && format != VK_FORMAT_B8G8R8A8_SRGB &&
-        format != VK_FORMAT_R8G8B8A8_UNORM && format != VK_FORMAT_R8G8B8A8_SRGB) return 0;
-    if (!ov_buf[slot]) {
-        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = OV_W * OV_H * 4,
-                                 .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
-        if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &ov_buf[slot]), "overlay buffer")) return 0;
-        VkMemoryRequirements req;
-        vk.vkGetBufferMemoryRequirements(vkc.device, ov_buf[slot], &req);
-        uint32_t type = UINT32_MAX;
-        for (uint32_t i = 0; i < vkc.memory.memoryTypeCount && type == UINT32_MAX; i++)
-            if ((req.memoryTypeBits & (1u << i)) && (vkc.memory.memoryTypes[i].propertyFlags &
-                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
-                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) type = i;
-        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
-        void *map = NULL;
-        if (type == UINT32_MAX || !vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &ov_mem[slot]), "overlay memory") ||
-            !vk_check(vk.vkBindBufferMemory(vkc.device, ov_buf[slot], ov_mem[slot], 0), "overlay bind") ||
-            !vk_check(vk.vkMapMemory(vkc.device, ov_mem[slot], 0, VK_WHOLE_SIZE, 0, &map), "overlay map")) {
-            vk.vkDestroyBuffer(vkc.device, ov_buf[slot], NULL);
-            ov_buf[slot] = VK_NULL_HANDLE;
-            vkp_overlay(NULL);   // no host-visible memory: no overlay rather than trying every frame
-            return 0;
-        }
-        ov_map[slot] = map;
-    }
-    uint32_t scale = extent.height >= 1400 ? 3 : 2, pad = 4 * scale, adv = 6 * scale, lh = 10 * scale;
-    uint32_t lines = 0, longest = 0;
-    for (const char *s = text; *s;) {   // the box: the longest line, the number of lines
-        const char *e = strchr(s, '\n');
-        uint32_t len = (uint32_t)(e ? (size_t)(e - s) : strlen(s));
-        if (*s == '~' && len) len--;
-        if (len > longest) longest = len;
-        lines++;
-        s = e ? e + 1 : s + strlen(s);
-    }
-    uint32_t bw = 2 * pad + longest * adv - scale, bh = 2 * pad + lines * lh - 3 * scale;
-    if (bw > OV_W) bw = OV_W;
-    if (bh > OV_H) bh = OV_H;
-    if (bw + 16 > extent.width || bh + 16 > extent.height) return 0;
-    uint32_t *px = ov_map[slot], bg = ov_pixel(12, 17, 15), edge = ov_pixel(140, 120, 70);
-    uint32_t gold = ov_pixel(243, 226, 169), cream = ov_pixel(220, 214, 196), green = ov_pixel(94, 242, 200);
-    for (uint32_t y = 0; y < bh; y++)
-        for (uint32_t x = 0; x < bw; x++) px[y * bw + x] = lines > 1 && (x == 0 || y == 0 || x == bw - 1 || y == bh - 1) ? edge : bg;
-    uint32_t line = 0, col = 0, fg = gold;
-    for (const char *s = text; *s; s++) {
-        if (*s == '\n') { line++; col = 0; continue; }
-        if (col == 0) fg = line == 0 ? gold : *s == '~' ? green : cream;
-        if (col == 0 && *s == '~') continue;
-        const uint8_t *g = glyph(*s);
-        uint32_t cx = col++;
-        if (!g) continue;
-        for (uint32_t row = 0; row < 7; row++)
-            for (uint32_t gc = 0; gc < 5; gc++) {
-                if (!(g[row] >> (4 - gc) & 1)) continue;
-                uint32_t x0 = pad + cx * adv + gc * scale, y0 = pad + line * lh + row * scale;
-                for (uint32_t y = y0; y < y0 + scale && y < bh; y++)
-                    for (uint32_t x = x0; x < x0 + scale && x < bw; x++) px[y * bw + x] = fg;
-            }
-    }
-    *w = bw; *h = bh;
-    return 1;
-}
-
-void vkp_overlay(const char *text) {
-    pthread_mutex_lock(&mu);
-    snprintf(ov_text, sizeof ov_text, "%s", text ? text : "");
-    pthread_mutex_unlock(&mu);
-}
 
 // Command buffers and sync objects of the present thread (the device is vk.c's).
 static int create_present_objects(void) {
@@ -174,7 +55,11 @@ static int create_present_objects(void) {
 }
 
 static void destroy_swapchain(void) {
-    for (uint32_t i = 0; i < nimages; i++) vk.vkDestroySemaphore(vkc.device, render_done[i], NULL);
+    for (uint32_t i = 0; i < nimages; i++) {
+        vk.vkDestroySemaphore(vkc.device, render_done[i], NULL);
+        if (views[i]) vk.vkDestroyImageView(vkc.device, views[i], NULL);
+        views[i] = VK_NULL_HANDLE;
+    }
     if (swapchain) vk.vkDestroySwapchainKHR(vkc.device, swapchain, NULL);
     swapchain = VK_NULL_HANDLE;
     nimages = 0;
@@ -219,7 +104,12 @@ static int create_swapchain(void) {
     nimages = MAX_IMAGES;
     vk.vkGetSwapchainImagesKHR(vkc.device, swapchain, &nimages, images);
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    for (uint32_t i = 0; i < nimages; i++) vk.vkCreateSemaphore(vkc.device, &si, NULL, &render_done[i]);
+    for (uint32_t i = 0; i < nimages; i++) {
+        vk.vkCreateSemaphore(vkc.device, &si, NULL, &render_done[i]);
+        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = images[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = format, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (!vk_check(vk.vkCreateImageView(vkc.device, &vi, NULL, &views[i]), "swapchain view")) views[i] = VK_NULL_HANDLE;   // no overlay on it
+    }
     LOG("swapchain %ux%u, %u images, %s", extent.width, extent.height, nimages,
         mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
     return 1;
@@ -332,6 +222,7 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
     vk.vkBeginCommandBuffer(cb, &bi);
     barrier(cb, images[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    int overlay = 0;
     VkClearColorValue c = out ? (VkClearColorValue){{0, 0, 0, 1}} : frame_colour(n);   // bars around the game picture
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vk.vkCmdClearColorImage(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &range);
@@ -347,20 +238,20 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
         vk.vkCmdBlitImage(cb, out->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           1, &b, VK_FILTER_LINEAR);
-        uint32_t ow, oh;
-        if (ov_draw(slot, &ow, &oh)) {   // over the picture's top left corner
-            barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            int ox = dx + 12, oy = dy + 12;
-            if (ox + (int)ow > (int)extent.width) ox = 0;
-            if (oy + (int)oh > (int)extent.height) oy = 0;
-            VkBufferImageCopy r = {.bufferRowLength = ow, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                                   .imageOffset = {ox, oy, 0}, .imageExtent = {ow, oh, 1}};
-            vk.vkCmdCopyBufferToImage(cb, ov_buf[slot], images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+        if (ovl_visible() && views[idx]) {   // the overlay (overlay.cpp) drawn over it
+            barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            ovl_draw(cb, views[idx], extent, (VkRect2D){{dx, dy}, {(uint32_t)dw, (uint32_t)dh}}, slot);
+            overlay = 1;
         }
     }
-    barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    if (overlay)
+        barrier(cb, images[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    else
+        barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     vk.vkEndCommandBuffer(cb);
     // wait for the swapchain image and, with a game frame, for the replayer's copy into the output image
     VkSemaphoreSubmitInfo waits[2] = {
@@ -390,6 +281,7 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         static uint64_t last;   // the longest time between two game frames shown (vkp_worst_frame_ms)
         uint64_t now = SDL_GetTicksNS(), gap = last ? now - last : 0;
         last = now;
+        if (gap) ovl_frame_time(gap / 1e6);
         uint64_t worst = atomic_load(&worst_gap_ns);
         while (gap > worst && !atomic_compare_exchange_weak(&worst_gap_ns, &worst, gap)) {}
     }

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { setLang } from './i18n.js';
+import { setLang, currentLang } from './i18n.js';
 import { check as checkLauncherUpdate } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
@@ -801,7 +801,7 @@ async function play() {
   const pos = await win.outerPosition(), size = await win.outerSize();
   try {
     await invoke('launch_game', {
-      rect: [pos.x, pos.y, size.width, size.height], fullscreen, borderless: prefs.frameless,
+      rect: [pos.x, pos.y, size.width, size.height], fullscreen, borderless: prefs.frameless, lang: currentLang(),
     });
     watchStartup();
     refresh();

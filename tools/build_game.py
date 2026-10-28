@@ -39,6 +39,13 @@ GFX = ['src/gfx/nvn/hle_nvn.c', 'src/gfx/nvn/nvn_tex.c', 'src/gfx/nvn/totk_nvn_e
        'src/gfx/front_win.c', 'src/gfx/nvn/totk_vpool_win.c', 'src/gfx/backend_vk.c', 'src/gfx/vkb_tex.c', 'src/gfx/vkb_shader.c', 'src/gfx/vkb_spv.c', 'src/gfx/vkb_audit.c', 'src/gfx/vkb_copy.c', 'src/gfx/vkb_desc.c', 'src/gfx/vkb_shadow.c', 'src/gfx/vkb_ucap.c',
        'src/gfx/vkb_draw.c', 'src/gfx/tex/nvn_deswizzle.c', 'src/gfx/tex/astc.c', 'src/gfx/vkb_bc7.c',
        'src/gfx/tex/bc7.cpp', 'src/gfx/tex/bc7enc/bc7enc.cpp', 'src/gfx/tex/bc7enc/rgbcx.cpp', 'src/gfx/tex/bc7key.c']
+# The in-game overlay (src/vk/overlay.cpp) with Dear ImGui (third_party/imgui, MIT): C++ like the BC7 encoder. ImGui's
+# Win32 clipboard / IME / shell helpers are left out (the overlay has no text input), and its SSE 4.2 hash (the game
+# folder's toolchain has no nmmintrin.h).
+OVERLAY = ['src/vk/overlay.cpp', 'third_party/imgui/imgui.cpp', 'third_party/imgui/imgui_draw.cpp',
+           'third_party/imgui/imgui_tables.cpp', 'third_party/imgui/imgui_widgets.cpp']
+UI_DEFINES = ('-Ithird_party/imgui -DIMGUI_DISABLE_WIN32_FUNCTIONS -DIMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS'
+              ' -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -DIMGUI_DISABLE_SSE')
 # (macOS: the real Mach headers, not compat/'s Windows stand-ins)
 GFX_INCLUDES = '-Isrc/gfx -Isrc/gfx/nvn -Isrc/gfx/nvn/include' + ('' if MAC else ' -Isrc/gfx/compat')
 LIBS_WIN = '-static -Wl,--subsystem,windows -Wl,--error-limit=0 -Wl,--disable-high-entropy-va -pthread -ldbghelp -lwinmm -lsynchronization -lshell32 -lopus -lvpx -lSDL3 -liconv' \
@@ -119,6 +126,11 @@ def main():
         '  command = clang++ -MD -MF $out.d $gfxflags -std=c++17 -fno-exceptions -fno-rtti -c $in -o $out',
         '  depfile = $out.d',
         '  deps = gcc',
+        f'uiflags = {CFLAGS} -Wall -Ibuild {UI_DEFINES}',
+        'rule uicxx',
+        '  command = clang++ -MD -MF $out.d $uiflags -std=c++17 -fno-exceptions -fno-rtti -c $in -o $out',
+        '  depfile = $out.d',
+        '  deps = gcc',
         'rule gamecc',
         '  command = clang -MD -MF $out.d $gameflags -c $in -o $out',   # runtime headers (cpu.h, simd*.h) are inlined
         '  depfile = $out.d',
@@ -147,6 +159,12 @@ def main():
             cxx = src.endswith('.cpp')
             obj = f'build/obj/{src.rsplit(".", 1)[0].replace("/", "_")}.o'
             lines.append(f'build {obj}: {"gfxcxx" if cxx else "gfxcc"} {src}')
+            objs.append(obj)
+        for src in OVERLAY:
+            obj = f'build/obj/{src.rsplit(".", 1)[0].replace("/", "_")}.o'
+            lines.append(f'build {obj}: uicxx {src}')
+            if src.startswith('third_party/'):
+                lines.append(f'  uiflags = {CFLAGS} -w {UI_DEFINES}')
             objs.append(obj)
     game_objs = []
     for module in ('main', 'subsdk0', 'sdk'):

@@ -561,6 +561,81 @@ static void prewarm_start(void) {
     }
 }
 
+// ---- shaders made in the background (TOTK_SHADER_ASYNC=0: off): during play, a vertex or fragment shader met for the
+// first time is made by ASYNC_THREADS low-priority threads while the draws that need it are skipped (vkb_draw.c's
+// resolve_program): that object is missing for a few frames instead of the whole picture freezing for the ~45 ms the
+// driver takes per shader (AMD, 2026-10-27: 100-800 ms hitches in new areas). Compute shaders (later work reads what
+// they write) and every shader while a loading screen is up (nothing visible stalls then) are still made at once.
+#define ASYNC_THREADS 2
+#define ASYNC_QUEUE 1024
+extern int (*g_nvn_loadscreen_up)(void);   // nvn/hle_nvn.c
+static pthread_mutex_t g_aq_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_aq_cv = PTHREAD_COND_INITIALIZER;
+static shentry *g_aq[ASYNC_QUEUE];
+static int g_aq_head, g_aq_n;              // under g_aq_mu
+static _Atomic int g_async_busy;           // queued + being made
+static uint64_t g_async_made;
+int vkb_shader_compiling(void) { return atomic_load(&g_async_busy); }
+void vkb_shader_async_stats(uint64_t *made, uint64_t *loaded, uint64_t *missing) { *made = g_async_made; *loaded = g_loaded; *missing = g_missing; }
+
+static void *async_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("totk-shader-async");
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#else
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+    for (;;) {
+        pthread_mutex_lock(&g_aq_mu);
+        while (!g_aq_n) pthread_cond_wait(&g_aq_cv, &g_aq_mu);
+        shentry *e = g_aq[g_aq_head];
+        g_aq_head = (g_aq_head + 1) % ASYNC_QUEUE;
+        g_aq_n--;
+        pthread_mutex_unlock(&g_aq_mu);
+        vkb_shader sh = {0};
+        sh.key = e->key;
+        int ok = load(&sh, e->key, e->sh.stage);
+        pthread_mutex_lock(&g_mu);
+        if (ok) {
+            sh.pending = 1;   // copied while still pending; the draws see it once pending is cleared below
+            e->sh = sh;
+            g_loaded++;
+            g_async_made++;
+            list_add(e->key, sh.stage);
+        } else if (g_missing++ < 16) VLOG("shader %s (stage %d): no translation in %s", e->key, e->sh.stage, cache_dir());
+        __atomic_store_n(&e->sh.pending, 0, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&g_mu);
+        atomic_fetch_sub(&g_async_busy, 1);
+    }
+    return NULL;
+}
+static void async_start(void) {
+    for (int i = 0; i < ASYNC_THREADS; i++) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, async_thread, NULL) == 0) pthread_detach(t);
+    }
+}
+// g_mu held. 1: e is queued (pending); 0: make it here (off, compute, a loading screen, the queue full).
+static int async_queue(shentry *e, int stage) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("TOTK_SHADER_ASYNC"); on = !(v && *v == '0'); if (!on) VLOG("shaders made in the background: off"); }
+    if (!on || stage == 5 || (g_nvn_loadscreen_up && g_nvn_loadscreen_up())) return 0;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, async_start);
+    pthread_mutex_lock(&g_aq_mu);
+    int queued = g_aq_n < ASYNC_QUEUE;
+    if (queued) {
+        e->sh.stage = stage;
+        e->sh.pending = 1;
+        g_aq[(g_aq_head + g_aq_n++) % ASYNC_QUEUE] = e;
+        atomic_fetch_add(&g_async_busy, 1);
+        pthread_cond_signal(&g_aq_cv);
+    }
+    pthread_mutex_unlock(&g_aq_mu);
+    return queued;
+}
+
 const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
     const uint8_t *control = sd->control;
     if (!control || !sd->data) return NULL;
@@ -581,6 +656,12 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
         if (!e) die("shader entry");
         memcpy(e->key, key, sizeof key);
         e->sh.key = e->key;
+        if (async_queue(e, (int)stage)) {   // made in the background: draws with it are skipped meanwhile
+            e->next = g_tab[h];
+            g_tab[h] = e;
+            pthread_mutex_unlock(&g_mu);
+            return &e->sh;
+        }
         uint64_t t0 = runtime_now_ns();
         int ok = load(&e->sh, key, (int)stage);
         vkb_shader_load_ns += runtime_now_ns() - t0;
@@ -594,6 +675,10 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
         }
         e->next = g_tab[h];
         g_tab[h] = e;
+    }
+    if (__atomic_load_n(&e->sh.pending, __ATOMIC_ACQUIRE)) {   // still being made
+        pthread_mutex_unlock(&g_mu);
+        return &e->sh;
     }
     if (e->sh.obj && !e->c1_set) {   // loaded now or ahead (prewarm): the constants come with the game's program
         e->c1_set = 1;

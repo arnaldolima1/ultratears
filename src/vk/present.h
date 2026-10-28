@@ -15,8 +15,6 @@ void vkp_resized(void);             // the window changed size: the swapchain is
 uint64_t vkp_presented(void);       // frames shown so far
 uint64_t vkp_frames(void);          // frames the game presented so far
 int vkp_active(void);               // a window with a swapchain is there (else the replayer skips the copy)
-void vkp_overlay(const char *text); // text in the top left corner over the game's picture (0-9 A-Z . : - / % ( ) [ ] + , | = >,
-                                    // lines end with \n; see present.c); NULL = none
 uint64_t vkp_game_shown(void);      // game frames (not the cycling colour) shown so far
 double vkp_worst_frame_ms(void);    // the longest time between two game frames shown since the last call
 const char *vkp_gpu_name(void);
