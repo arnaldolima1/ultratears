@@ -2175,6 +2175,9 @@ static void game_work_tick(uint64_t frame) {
         const int32_t *k = (const int32_t *)(uintptr_t)nvn_frame_ctl();
         LOG("[nvn] game frame work time (+0x118) through frame %llu: p50 %.2f / p90 %.2f / max %.2f ms (%d frames, %llu total over 33.3 ms); controller range %d..%d current %d",
             (unsigned long long)frame, v[n / 2], v[n * 9 / 10], v[n - 1], n, (unsigned long long)over33, k[0], k[1], k[0x40 / 4]);
+        { const uint8_t *b = (const uint8_t *)(uintptr_t)g_game_sys;   // (1.2.1's offsets: whether 1.4.3 keeps them is what this shows)
+          LOG("[nvn] frame-end mode through frame %llu: +0x222=%#x +0x223=%u (1 waits for the previous frame's GPU work each frame) +0x224=%u +0x225=%#x",
+              (unsigned long long)frame, b[0x222], b[0x223], b[0x224], b[0x225]); }
         n = 0;
         return;
     }
@@ -2185,8 +2188,18 @@ static void game_work_tick(uint64_t frame) {
           b[0x222], b[0x223], b[0x224], b[0x225], b[0xa6], *(const int32_t *)(b + 0x50), *(const uint32_t *)(b + 0x88)); }
     n = 0;
 }
+void nvn_set_framewait(int on);
 /* TOTK diagnostic "flag framewait 0|1": the game's frame-end mode request (system object +0x224: 2 = no per-frame wait for the
    GPU, 1 = wait), applied by the game at the start of its next frame (main+0x8f69e0). Measurement only. */
+void nvn_framewait_toggle(void) {   // F10 (window_sdl.c): A/B of the per-frame GPU wait, live
+    if (!g_game_sys) { LOG("[warning] [flag] framewait: game system object not found yet"); return; }
+    const volatile uint8_t *b = (const volatile uint8_t *)(uintptr_t)g_game_sys;
+    if (b[0x223] > 1 || b[0x224] > 2) {   // not the mode bytes in this version: leave the memory alone
+        LOG("[warning] [flag] framewait: +0x223=%u +0x224=%u do not look like the frame-end mode; nothing written", b[0x223], b[0x224]);
+        return;
+    }
+    nvn_set_framewait(b[0x223] != 1);
+}
 void nvn_set_framewait(int on) {
     if (!g_game_sys) { LOG("[warning] [flag] framewait: game system object not found yet"); return; }
     *(volatile uint8_t *)(uintptr_t)(g_game_sys + 0x224) = on ? 1 : 2;
