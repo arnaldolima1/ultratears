@@ -22,7 +22,11 @@
 
 // ---------------- upload memory and descriptor pools, per command slot ----------------
 typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; VkDeviceSize size, used; } chunk_t;
-typedef struct { chunk_t c[32]; int n, cur; VkDescriptorPool pool[64]; int npool, curpool; } slot_res;
+typedef struct { chunk_t c[32]; int n, cur, peak, resets; VkDescriptorPool pool[64]; int npool, curpool; } slot_res;
+// Upload memory grows from a small chunk (doubling up to RING_MAX, or the size of one large upload) and gives back the
+// chunks a slot and thread did not touch over RING_TRIM of the slot's submissions. Before: chunks of at least 64 MiB
+// per slot and recording thread, kept for good - 1.9-2.6 GB of host memory after a load and a run (2026-10-28, L7).
+enum { RING_MIN = 4u << 20, RING_MAX = 64u << 20, RING_TRIM = 120 };
 static slot_res g_res[VKB_SLOTS][VKB_MAXREC];   // per slot and recording thread (vkb_mt.c)
 static struct { VkBuffer buf; VkDeviceMemory mem; VkDeviceSize used; } g_mpool[VKB_SLOTS];   // device memory for mirrors
 static uint32_t g_ring_type = UINT32_MAX;
@@ -55,6 +59,21 @@ static int chunk_new(chunk_t *c, VkDeviceSize size) {
     c->map = m; c->size = size; c->used = 0;
     return 1;
 }
+static void chunk_free(chunk_t *c) {   // no submission uses it (its slot's last one is done)
+    vk.vkDestroyBuffer(vkc.device, c->buf, NULL);
+    vk.vkFreeMemory(vkc.device, c->mem, NULL);   // unmaps
+    memset(c, 0, sizeof *c);
+}
+// The slot's previous submission is done: chunks this pair has not touched over RING_TRIM submissions go back.
+static void ring_trim(slot_res *r) {
+    int touched = r->n;   // the chunks up to the last one written
+    while (touched > 0 && !r->c[touched - 1].used) touched--;
+    if (touched > r->peak) r->peak = touched;
+    if (++r->resets < RING_TRIM) return;
+    while (r->n > r->peak) chunk_free(&r->c[--r->n]);
+    r->peak = 0;
+    r->resets = 0;
+}
 
 static __thread uint64_t g_rec;   // the command buffer this thread records (its caches below compare against it)
 static _Atomic uint64_t g_rec_next;   // unique across threads
@@ -72,6 +91,7 @@ void vkb_slot_reset(int slot) {   // the slot's previous submission has complete
     if (vkb_db_on()) vkb_db_slot_reset(slot);
     for (int w = 0; w < VKB_MAXREC; w++) {
         slot_res *r = &g_res[slot][w];
+        ring_trim(r);
         for (int i = 0; i < r->n; i++) r->c[i].used = 0;
         r->cur = 0;
         for (int i = 0; i < r->npool; i++) vk.vkResetDescriptorPool(vkc.device, r->pool[i], 0);
@@ -100,8 +120,10 @@ void *vkb_ring_alloc(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDevice
             r->cur++;
             continue;
         }
-        if (r->n == 32) die("upload memory: 32 chunks (2 GiB) in one submission");
-        if (!chunk_new(&r->c[r->n], n > (64u << 20) ? n : (64u << 20))) die("upload memory");
+        if (r->n == 32) die("upload memory: 32 chunks in one submission");
+        VkDeviceSize grow = r->n ? r->c[r->n - 1].size * 2 : RING_MIN;
+        if (grow > RING_MAX) grow = RING_MAX;
+        if (!chunk_new(&r->c[r->n], n > grow ? n : grow)) die("upload memory");
         r->n++;
     }
 }
